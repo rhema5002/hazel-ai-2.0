@@ -1,0 +1,12 @@
+{
+  "name": "Hazel AI ",
+  "description": "Standalone, offline-first voice assistant with continuous speech recognition, real-time spoken responses, local timers, notes, reminders, and optional cloud reasoning.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera",
+    "display-capture"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
