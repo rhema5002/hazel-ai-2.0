@@ -110,6 +110,25 @@ function extractGeminiError(
   return { status, message };
 }
 
+function isTransientOverloadError(status: number, rawMessage: string): boolean {
+  if (status === 503 || status === 502 || status === 504 || status === 500 || status === 429) {
+    return true;
+  }
+  const lower = rawMessage.toLowerCase();
+  return (
+    lower.includes('high demand') ||
+    lower.includes('overloaded') ||
+    lower.includes('unavailable') ||
+    lower.includes('temporarily') ||
+    lower.includes('try again later') ||
+    lower.includes('capacity') ||
+    lower.includes('deadline exceeded') ||
+    lower.includes('econnreset') ||
+    lower.includes('etimedout') ||
+    lower.includes('fetch failed')
+  );
+}
+
 function friendlyErrorMessage(status: number, rawMessage: string): string {
   const lower = rawMessage.toLowerCase();
   if (
@@ -121,10 +140,59 @@ function friendlyErrorMessage(status: number, rawMessage: string): string {
   ) {
     return 'Unable to authenticate with the language service. Check the server API key configuration.';
   }
+  if (
+    status === 503 ||
+    lower.includes('high demand') ||
+    lower.includes('overloaded') ||
+    lower.includes('unavailable')
+  ) {
+    return 'The AI service is temporarily experiencing high demand. Please tap Try again in a moment.';
+  }
   if (status === 429 || lower.includes('quota') || lower.includes('rate limit')) {
     return 'Rate limit or quota exceeded right now. Please wait a moment and try again.';
   }
   return rawMessage;
+}
+
+async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  params: Parameters<GoogleGenAI['models']['generateContent']>[0]
+) {
+  const alternateModel =
+    params.model === 'gemini-3.1-flash-lite'
+      ? 'gemini-4-hydrogen'
+      : 'gemini-3.1-flash-lite';
+  const attempts: Array<{ model: string; delayMs: number }> = [
+    { model: params.model, delayMs: 0 },
+    { model: alternateModel, delayMs: 900 },
+  ];
+
+  let lastErr: unknown;
+  for (let i = 0; i < attempts.length; i++) {
+    const attempt = attempts[i];
+    if (attempt.delayMs > 0) {
+      await new Promise((r) => setTimeout(r, attempt.delayMs));
+    }
+    try {
+      return await ai.models.generateContent({
+        ...params,
+        model: attempt.model,
+      });
+    } catch (err) {
+      lastErr = err;
+      const rawMessage = err instanceof Error ? err.message : '';
+      const rawStatus =
+        typeof (err as { status?: unknown })?.status === 'number'
+          ? (err as { status: number }).status
+          : 502;
+      const unwrapped = unwrapJsonErrorMessage(rawMessage);
+      const code = unwrapped.code ?? rawStatus;
+      if (!isTransientOverloadError(code, unwrapped.message || rawMessage)) {
+        throw err;
+      }
+    }
+  }
+  throw lastErr;
 }
 
 interface IncomingAttachment {
@@ -149,9 +217,52 @@ const ALLOWED_IMAGE_MIMES = new Set([
 ]);
 const MAX_ATTACHMENT_COUNT = 5;
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
-const MAX_TEXT_ATTACHMENT_CHARS = 48_000;
-const MAX_TURN_TEXT_CHARS = 32_000;
-const MAX_HISTORY_TURNS = 30;
+const MAX_TEXT_ATTACHMENT_CHARS = 24_000;
+const MAX_TURN_TEXT_CHARS = 16_000;
+const MAX_HISTORY_TURNS = 14;
+
+const CHAT_RATE_WINDOW_MS = 60_000;
+const CHAT_MAX_REQUESTS_PER_WINDOW = 10;
+const CHAT_MIN_INTERVAL_MS = 1500;
+const CHAT_OVERLOAD_COOLDOWN_MS = 4000;
+const chatRateTracker = new Map<
+  string,
+  { timestamps: number[]; lastRequestAt: number; cooldownUntil: number }
+>();
+
+function checkClientChatRateLimit(clientKey: string): string | null {
+  const now = Date.now();
+  const entry = chatRateTracker.get(clientKey) ?? {
+    timestamps: [],
+    lastRequestAt: 0,
+    cooldownUntil: 0,
+  };
+  if (now < entry.cooldownUntil) {
+    const waitSec = Math.max(1, Math.ceil((entry.cooldownUntil - now) / 1000));
+    return `Free-tier API is cooling down after high demand. Please wait ${waitSec}s and try again.`;
+  }
+  if (entry.lastRequestAt > 0 && now - entry.lastRequestAt < CHAT_MIN_INTERVAL_MS) {
+    return 'Please wait a moment before sending another message.';
+  }
+  entry.timestamps = entry.timestamps.filter((ts) => now - ts < CHAT_RATE_WINDOW_MS);
+  if (entry.timestamps.length >= CHAT_MAX_REQUESTS_PER_WINDOW) {
+    return 'Rate limit protection: please wait a few seconds before sending more messages on the free tier.';
+  }
+  entry.timestamps.push(now);
+  entry.lastRequestAt = now;
+  chatRateTracker.set(clientKey, entry);
+  return null;
+}
+
+function noteClientOverloadCooldown(clientKey: string): void {
+  const entry = chatRateTracker.get(clientKey) ?? {
+    timestamps: [],
+    lastRequestAt: Date.now(),
+    cooldownUntil: 0,
+  };
+  entry.cooldownUntil = Date.now() + CHAT_OVERLOAD_COOLDOWN_MS;
+  chatRateTracker.set(clientKey, entry);
+}
 
 function sanitizeFilename(rawName: unknown, fallback: string): string {
   if (typeof rawName !== 'string') return fallback;
@@ -619,11 +730,11 @@ const forgetMemoryTool: FunctionDeclaration = {
 };
 
 async function composeSongWithGemini(ai: GoogleGenAI, prompt: string) {
-  const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
+  const response = await generateContentWithRetry(ai, {
+    model: 'gemini-3.1-flash-lite',
     contents: `Compose an original musical arrangement & lyrics for: "${prompt}". Choose chords ONLY from: C, Cm, Cmaj7, D, Dm, Dm7, E, Em, Em7, F, Fm, Fmaj7, G, Gm, G7, A, Am, Am7, Bb, Bm. Pick 4 chords, 8-16 MIDI melody notes (60-84), and 4 MIDI bass notes (36-52) in the same key.`,
     config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
       responseMimeType: 'application/json',
       responseSchema: {
         type: Type.OBJECT,
@@ -705,11 +816,11 @@ function buildFallbackSvg(title: string): string {
 
 async function composeImageWithGemini(ai: GoogleGenAI, prompt: string, styleHint?: string) {
   const styleText = styleHint?.trim() || 'vivid layered vector art';
-  const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
+  const response = await generateContentWithRetry(ai, {
+    model: 'gemini-3.1-flash-lite',
     contents: `Create a detailed, artistic, multi-layered SVG illustration for: "${prompt}" in style "${styleText}". Requirements: root <svg viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">, rich <defs> linear/radial gradients, detailed background, midground, and foreground vector shapes/paths, lighting highlights, clean composition, NO script/foreignObject/external image tags.`,
     config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
       responseMimeType: 'application/json',
       responseSchema: {
         type: Type.OBJECT,
@@ -754,11 +865,11 @@ async function composeImageWithGemini(ai: GoogleGenAI, prompt: string, styleHint
 }
 
 async function composeVideoWithGemini(ai: GoogleGenAI, prompt: string) {
-  const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
+  const response = await generateContentWithRetry(ai, {
+    model: 'gemini-3.1-flash-lite',
     contents: `Design a short looping animated motion scene for: "${prompt}". Choose archetype ONLY from: cosmic-nebula, cyber-rain, ocean-waves, mountain-sunrise, botanical-breeze, geometric-pulse. Provide 5 hex colors in palette (#RRGGBB from darkest background to brightest highlight), durationSeconds (6 to 12), and 3 to 5 scenes with short evocative captions.`,
     config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
       responseMimeType: 'application/json',
       responseSchema: {
         type: Type.OBJECT,
@@ -936,6 +1047,13 @@ async function createServer() {
       return;
     }
 
+    const clientRateKey = authUser?.id || req.ip || 'guest';
+    const rateLimitError = checkClientChatRateLimit(clientRateKey);
+    if (rateLimitError) {
+      res.status(429).json({ error: rateLimitError });
+      return;
+    }
+
     const webSearch = Boolean(body?.webSearch);
     const skipTimerTool = Boolean(body?.skipTimerTool);
     const tzOffsetMinutes =
@@ -944,50 +1062,28 @@ async function createServer() {
         : 0;
 
     const chatInstruction = [
-      'You are Hazel, a warm, genuine, easygoing friend having a natural conversation.',
-      'Speak like a real, supportive friend—approachable, relatable, down-to-earth, empathetic, and lightly playful when it fits. Use natural everyday phrasing and contractions rather than stiff, formal, corporate, or textbook language.',
-      'Relate naturally to day-to-day life: daily routines, work/life balance, cooking and food, errands, weekend plans, hobbies, movies/music, fitness, travel, relationships, personal goals, or just talking through whatever is on someone’s mind.',
-      'Keep replies conversational and well-paced, ask light follow-up questions when it feels natural, and avoid overly long lectures or walls of formatting unless helpful.',
-      'Strict Chat-mode scope: Chat mode is strictly for friendly everyday conversation and day-to-day topics. Do NOT bring up, steer toward, or offer building apps, debugging code, or exploring technical AI/ML concepts on your own—all app building, AI/ML exploration, and code debugging belong exclusively in Workspace mode. If the user explicitly asks to build an app, explore an AI/ML architecture/concept, or debug code while in Chat mode, acknowledge warmly in one or two friendly sentences and invite them to switch over to Workspace mode (at the top of the screen) where your code studio, AI/ML tools, and live preview live.',
-      'When the user asks to generate a song/music, image/illustration, animated clip, set a timer/countdown, or set a time-based reminder, call the matching tool (`create_song`, `create_image`, `create_video`, `set_timer`, or `set_reminder`) naturally and let them know an alert or notification will fire when time is up.',
-      'If web search grounding is enabled and external facts are checked, weave accurate, up-to-date facts naturally into the conversation without fabricating citations.',
+      'You are Hazel, a warm, genuine, easygoing friend having a natural everyday conversation.',
+      'Use approachable, everyday phrasing and concise pacing without stiff corporate tone or walls of text.',
+      'Chat mode scope: stay on friendly everyday conversation. If asked to build an app, debug code, or explore AI/ML architectures, warmly suggest switching to Workspace mode at the top of the screen.',
     ];
 
     if (view === 'chat') {
       if (mode === 'teacher') {
         chatInstruction.push(
-          'You are in Teacher mode as a warm, patient friend explaining everyday things simply: start with an intuitive real-life analogy, walk through ideas step by step in plain everyday language without technical jargon or code, and offer a gentle check-in question.'
+          'Teacher mode: explain clearly with a relatable real-life analogy, simple steps without jargon, and a friendly check-in question.'
         );
       } else if (mode === 'deep') {
         chatInstruction.push(
-          'You are in Deep Think mode as a thoughtful, attentive friend helping someone reflect carefully through a real-life decision, situation, or big idea.'
+          'Deep Think mode: help reason thoughtfully and clearly through a real-life decision or idea.'
         );
       }
     }
 
     const workspaceInstruction = [
-      'You are Hazel in Workspace Studio—a Principal Software Architect, Staff Systems Engineer, Principal AI/ML Research Scientist, and patient master mentor.',
-      'Workspace Studio is dedicated specifically to building complete apps and websites, exploring AI/ML concepts in depth, and debugging code.',
-      'Your teaching and mentoring style: explain AI/ML and engineering concepts from first principles using clear intuitive analogies, step-by-step breakdowns, worked examples, and mathematical/architectural clarity.',
-      'Your software engineering and coding capabilities are held to the highest production bar:',
-      '1. Correctness-First Design: Before writing code, reason carefully through invariants, state transitions, concurrency/race conditions, boundary and empty/null inputs, off-by-one errors, floating-point precision, and failure modes.',
-      '2. Complete, Runnable Implementations: Never emit placeholder stubs (`// TODO`, `# ... rest of implementation`), elided snippets, or hand-waved pseudocode unless the user explicitly asks for a high-level sketch. Write complete, self-contained, idiomatic, immediately runnable code.',
-      '3. Multi-Language Mastery: Write best-in-class idiomatic code across TypeScript (strict types, discriminated unions, exhaustive checks), React 19, Node.js, Python 3.12+ (type annotations, dataclasses/Pydantic, async, PyTorch), Rust (zero-cost abstractions, clean ownership/lifetimes, Result error handling), Go (explicit error wrapping, context propagation, goroutine lifecycle safety), C++20 (RAII, move semantics), and SQL (indexed queries, CTEs, window functions, zero N+1 traps).',
-      '4. Root-Cause Debugging: When diagnosing bugs or stack traces, identify the exact causal mechanism first, state the minimal input/state that triggers it, provide a clean surgical fix (or complete fixed module), and include a regression test that fails before and passes after the fix.',
-      '5. Security, Performance & Verification: Never introduce injection vectors (always parameterize SQL, sanitize untrusted HTML/URLs), enforce bounds and auth checks, clean up timers/streams/abort controllers, analyze time/space/VRAM complexity when non-trivial, and include concise runnable unit tests or assertions.',
-      'You also have deep mastery across the entire AI/ML stack:',
-      '(a) Machine Learning: supervised/unsupervised learning, feature engineering, regularization, cross-validation, gradient boosting (XGBoost, LightGBM, CatBoost), kernel methods, Bayesian inference, calibration, class-imbalance handling, data-leakage prevention, and rigorous evaluation metrics (ROC-AUC, PR-AUC, F1, log-loss, Brier score).',
-      '(b) Deep Learning: PyTorch (torch.nn, autograd, DataLoader, torch.amp, torch.compile), JAX/Flax, TensorFlow; optimizers (AdamW, cosine/warmup schedules, gradient clipping), normalization (LayerNorm, RMSNorm, BatchNorm), initialization (Xavier/Kaiming), CNNs/ResNets, U-Nets, Diffusion & Flow Matching, ViTs, RNNs/SSMs (Mamba), GNNs, and Mixture-of-Experts (MoE).',
-      '(c) Natural Language Processing & LLMs: tokenization (BPE, WordPiece, SentencePiece), embeddings & positional encodings (RoPE, ALiBi), attention architectures (MHA, MQA, GQA, FlashAttention, causal/padding masking, KV-cache), scaling laws, post-training & alignment (SFT, LoRA/QLoRA/PEFT, DPO, RLHF, GRPO, synthetic data), RAG & retrieval (chunking, hybrid BM25 + dense bi-encoders, cross-encoder reranking, faithfulness/recall evaluation), tool-using agents, structured outputs, and LLM evals.',
-      '(d) AI Systems & Production MLOps: distributed training (DDP, FSDP, ZeRO, tensor/pipeline parallelism), quantization (FP8, INT8, AWQ, GPTQ, GGUF), high-throughput inference serving (vLLM, PagedAttention, continuous batching, speculative decoding, TensorRT-LLM, ONNX), VRAM/compute budgeting, experiment tracking, and drift monitoring.',
-      'For ML/DL/NLP code: include explicit tensor shape annotations in comments (e.g., # [B, T, D]), device/dtype awareness, numerical stability guards (logsumexp, epsilons, torch.inference_mode()), and zero deprecated APIs.',
-      'Format responses using clean GitHub-flavored Markdown: lead directly with the solution or diagnosis without filler preambles, use concise headings, comparison tables when weighing trade-offs, and fenced code blocks with exact language identifiers (```ts, ```tsx, ```python, ```rust, ```go, ```sql, ```bash, ```html, ```svg, ```js, or ```lang:path/to/file).',
-      'End-to-End Builders ("Make me an AI", "Make an app", "Make a website"): Whenever the user asks you to build an AI, an application, or a website, build the ENTIRE working system from start to finish with zero truncated code, zero placeholders, and zero omitted helpers:',
-      '- Websites & Interactive Web Apps: Default to delivering one complete, self-contained, immediately runnable ```html code block containing full semantic HTML5, cohesive responsive CSS (desktop and mobile, refined typography, high contrast, optional dark/light toggle), and complete interactive JavaScript with real state, validation, and zero broken external dependencies so it runs live immediately in Workspace Preview.',
-      '- Full-Stack / Multi-File Apps: When React, Next.js, TypeScript, Node.js/Express, Rust, Go, or a multi-file repo is requested, output EVERY required file completely (entry point, components, state, API routes, types, config/package manifest) and label each block with its path (for example ```tsx:src/App.tsx or ```ts:server.ts).',
-      '- Complete AI Systems ("Make me an AI"): Depending on context, either (a) deliver a complete, runnable end-to-end Python AI codebase (model architecture, tokenizer/preprocessing, attention/layers with # [B, T, D] shape annotations, AdamW + cosine warmup training loop, checkpointing, evaluation, inference/API CLI, and requirements.txt—labeling each block e.g. ```python:model.py), OR (b) when a browser AI app or visual playground fits best, deliver a complete single-file ```html app containing working client-side neural/ML/agent logic and an interactive UI.',
-      'When the user asks to generate or compose a song/music, image/illustration/art, video/animation clip, set a timer/countdown, or schedule a time-based reminder, call the matching tool (`create_song`, `create_image`, `create_video`, `set_timer`, or `set_reminder`) rather than saying you cannot create media.',
-      'If web search grounding is enabled and external facts are checked, integrate accurate, up-to-date facts naturally. Never fabricate file contents, API signatures, tool output, or citations.',
+      'You are Hazel in Workspace Studio—a Principal Software Architect, Systems Engineer, and AI/ML Research Scientist.',
+      'Lead directly with complete, production-ready, zero-placeholder code and clear first-principles explanations.',
+      'For single-file web apps/websites, emit one complete self-contained ```html block runnable in Workspace Preview. For multi-file apps or Python/ML systems, emit complete files labeled ```lang:path/to/file with explicit tensor shape comments (# [B, T, D]), edge-case guards, and tests.',
+      'Never fabricate file contents, API signatures, or citations.',
     ];
 
     const guestMemories = authContext ? [] : sanitizeMemories(body?.memories);
@@ -996,23 +1092,56 @@ async function createServer() {
       : guestMemories;
     const memoriesBlock = formatMemoriesPromptBlock(effectiveMemories);
 
+    const latestUserTurn = [...turnCheck.turns]
+      .reverse()
+      .find((t) => t.role === 'user');
+    const latestTextLower = (latestUserTurn?.text || '').toLowerCase();
+
+    const selectedFunctionDeclarations: FunctionDeclaration[] = [];
+    if (
+      !skipTimerTool &&
+      /\b(timer|countdown|alarm|remind|reminder|wake me|in \d+|minutes?|seconds?|hours?)\b/i.test(
+        latestTextLower
+      )
+    ) {
+      selectedFunctionDeclarations.push(setTimerTool, setReminderTool);
+    }
+    if (/\b(song|music|lyric|lyrics|melody|beat|tune|sing|compose)\b/i.test(latestTextLower)) {
+      selectedFunctionDeclarations.push(createSongTool);
+    }
+    if (/\b(image|picture|draw|sketch|illustrat|artwork|painting|poster|logo|svg)\b/i.test(latestTextLower)) {
+      selectedFunctionDeclarations.push(createImageTool);
+    }
+    if (/\b(video|animation|animate|clip|movie|motion)\b/i.test(latestTextLower)) {
+      selectedFunctionDeclarations.push(createVideoTool);
+    }
+    const wantsMemoryTool =
+      /\b(remember|save|note|keep in mind|forget|erase|delete|memory|memories)\b/i.test(
+        latestTextLower
+      );
+    if (wantsMemoryTool) {
+      selectedFunctionDeclarations.push(saveMemoryTool, forgetMemoryTool);
+    }
+
     const memoryInstruction =
-      'Long-Term Memory: You have persistent memory across conversations! Whenever the user asks you to remember, save, or note something (or shares a lasting personal fact, name, preference, goal, or rule they want kept in mind), call `save_memory` right away with a concise statement and confirm warmly. Whenever the user asks you to forget or remove a saved detail, call `forget_memory`. Use any saved memories naturally in conversation without inventing memories that are not listed.';
+      selectedFunctionDeclarations.length > 0
+        ? 'Call matching tools (`set_timer`, `set_reminder`, `create_song`, `create_image`, `create_video`, `save_memory`, `forget_memory`) when requested.'
+        : '';
 
     if (view === 'workspace') {
       if (mode === 'teacher') {
         workspaceInstruction.push(
-          'You are operating in Teacher Mode inside Workspace. Act as an exceptional, encouraging personal tutor for engineering and AI/ML: (1) start with a crystal-clear big-picture intuition or analogy before jargon, (2) teach step by step with concrete worked examples and code, (3) highlight common pitfalls, and (4) finish with a short check-for-understanding question or practice exercise.'
+          'Teacher Mode: start with clear intuition, walk through worked examples/code step by step, note common pitfalls, and end with a quick check-in.'
         );
       } else if (mode === 'coder') {
         workspaceInstruction.push(
-          'You are operating in Pro Coder mode (maximum reasoning depth). Think through every architectural boundary, edge case, type contract, failure path, and performance bottleneck before emitting code. Deliver production-ready, zero-placeholder code with strict types, explicit tensor shape assertions for ML/DL modules, thorough edge-case guards, security hardening, Big-O/VRAM complexity notes, and runnable unit tests.'
+          'Pro Coder mode: verify invariants, edge cases, types, security, and runnable tests with zero stubs.'
         );
       }
-      workspaceInstruction.push(memoryInstruction);
+      if (memoryInstruction) workspaceInstruction.push(memoryInstruction);
       if (memoriesBlock) workspaceInstruction.push(memoriesBlock);
     } else {
-      chatInstruction.push(memoryInstruction);
+      if (memoryInstruction) chatInstruction.push(memoryInstruction);
       if (memoriesBlock) chatInstruction.push(memoriesBlock);
     }
 
@@ -1042,108 +1171,219 @@ async function createServer() {
     let emittedTextChars = 0;
     let emittedWidgets = 0;
 
-    const thinkingLevel =
-      mode === 'coder'
-        ? ThinkingLevel.XHIGH
-        : mode === 'deep' || mode === 'teacher'
-          ? ThinkingLevel.HIGH
-          : ThinkingLevel.LOW;
+    const tools: Array<{ googleSearch?: Record<string, never>; functionDeclarations?: FunctionDeclaration[] }> = [];
+    if (webSearch) {
+      tools.push({ googleSearch: {} });
+    }
+    if (selectedFunctionDeclarations.length > 0) {
+      tools.push({ functionDeclarations: selectedFunctionDeclarations });
+    }
+    const hasHybridTools = webSearch && selectedFunctionDeclarations.length > 0;
 
-    const functionDeclarations = [
-      setTimerTool,
-      setReminderTool,
-      createSongTool,
-      createImageTool,
-      createVideoTool,
-      saveMemoryTool,
-      forgetMemoryTool,
-    ];
+    const sleepWithKeepalive = async (totalMs: number) => {
+      let remaining = totalMs;
+      while (remaining > 0 && !clientClosed) {
+        if (!res.writableEnded) {
+          res.write(': keepalive\n\n');
+        }
+        const slice = Math.min(remaining, 1000);
+        await new Promise((r) => setTimeout(r, slice));
+        remaining -= slice;
+      }
+    };
 
-    const tools = webSearch
-      ? [{ googleSearch: {} }, { functionDeclarations }]
-      : [{ functionDeclarations }];
+    // Strictly free models, capped at max 2 attempts per request to conserve rate/quota
+    const streamAttempts: Array<{
+      model: string;
+      thinkingLevel: ThinkingLevel;
+      delayBeforeMs: number;
+      includeThoughts: boolean;
+      useStreaming: boolean;
+    }> =
+      mode === 'fast'
+        ? [
+            {
+              model: 'gemini-3.1-flash-lite',
+              thinkingLevel: ThinkingLevel.MINIMAL,
+              delayBeforeMs: 0,
+              includeThoughts: false,
+              useStreaming: true,
+            },
+            {
+              model: 'gemini-4-hydrogen',
+              thinkingLevel: ThinkingLevel.LOW,
+              delayBeforeMs: 1200,
+              includeThoughts: false,
+              useStreaming: true,
+            },
+          ]
+        : [
+            {
+              model: 'gemini-4-hydrogen',
+              thinkingLevel:
+                mode === 'coder' ? ThinkingLevel.HIGH : ThinkingLevel.MEDIUM,
+              delayBeforeMs: 0,
+              includeThoughts: true,
+              useStreaming: true,
+            },
+            {
+              model: 'gemini-3.1-flash-lite',
+              thinkingLevel:
+                mode === 'coder' ? ThinkingLevel.HIGH : ThinkingLevel.LOW,
+              delayBeforeMs: 1200,
+              includeThoughts: false,
+              useStreaming: true,
+            },
+          ];
+
+    const processCandidate = (
+      candidate: {
+        content?: { parts?: Part[] };
+        groundingMetadata?: {
+          groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+        };
+      } | undefined,
+      pendingCallParts: Part[],
+      modelTurnParts: Part[]
+    ): boolean => {
+      let emitted = false;
+      const parts = candidate?.content?.parts ?? [];
+
+      for (const part of parts) {
+        if (!part.thought) {
+          modelTurnParts.push(part);
+        }
+        if (part.functionCall) {
+          emitted = true;
+          pendingCallParts.push(part);
+          continue;
+        }
+        if (typeof part.text !== 'string' || part.text.length === 0) continue;
+        emitted = true;
+        if (part.thought) {
+          writeSseEvent(res, 'thought', { delta: part.text });
+        } else {
+          emittedTextChars += part.text.length;
+          writeSseEvent(res, 'text', { delta: part.text });
+        }
+      }
+
+      const groundingChunks = candidate?.groundingMetadata?.groundingChunks;
+      if (Array.isArray(groundingChunks) && groundingChunks.length > 0) {
+        let added = false;
+        for (const gc of groundingChunks) {
+          const url = gc?.web?.uri?.trim();
+          if (!url || !isSafeHttpUrl(url) || seenSourceUrls.has(url)) continue;
+          seenSourceUrls.add(url);
+          const title = gc?.web?.title?.trim() || new URL(url).hostname;
+          collectedSources.push({ title, url });
+          added = true;
+        }
+        if (added) {
+          writeSseEvent(res, 'sources', { sources: collectedSources });
+        }
+      }
+
+      return emitted;
+    };
 
     const streamTurn = async (
       turnContents: Content[],
       allowTools: boolean
     ): Promise<{ pendingCallParts: Part[]; modelTurnParts: Part[] }> => {
-      for (let attempt = 0; attempt < 2; attempt++) {
+      let lastErr: unknown;
+
+      for (let attemptIdx = 0; attemptIdx < streamAttempts.length; attemptIdx++) {
+        if (clientClosed) break;
+        const plan = streamAttempts[attemptIdx];
+        if (plan.delayBeforeMs > 0) {
+          await sleepWithKeepalive(plan.delayBeforeMs);
+          if (clientClosed) break;
+        }
+
         const pendingCallParts: Part[] = [];
         const modelTurnParts: Part[] = [];
         let sawOutputInAttempt = false;
+        const useTools = allowTools && tools.length > 0;
+        const requestConfig = {
+          systemInstruction,
+          thinkingConfig: {
+            thinkingLevel: plan.thinkingLevel,
+            includeThoughts: plan.includeThoughts,
+          },
+          ...(useTools
+            ? {
+                tools,
+                ...(hasHybridTools
+                  ? { toolConfig: { includeServerSideToolInvocations: true } }
+                  : {}),
+              }
+            : {}),
+        };
+
         try {
-          const stream = await ai.models.generateContentStream({
-            model: 'gemini-4-hydrogen',
-            contents: turnContents,
-            config: {
-              systemInstruction,
-              thinkingConfig: {
-                thinkingLevel,
-                includeThoughts: true,
-              },
-              ...(allowTools
-                ? {
-                    tools,
-                    ...(webSearch
-                      ? { toolConfig: { includeServerSideToolInvocations: true } }
-                      : {}),
-                  }
-                : {}),
-            },
-          });
+          if (plan.useStreaming) {
+            const stream = await ai.models.generateContentStream({
+              model: plan.model,
+              contents: turnContents,
+              config: requestConfig,
+            });
 
-          for await (const chunk of stream) {
-            if (clientClosed) break;
-
-            const candidate = chunk.candidates?.[0];
-            const parts = candidate?.content?.parts ?? [];
-
-            for (const part of parts) {
-              if (!part.thought) {
-                modelTurnParts.push(part);
-              }
-              if (part.functionCall) {
+            for await (const chunk of stream) {
+              if (clientClosed) break;
+              if (processCandidate(chunk.candidates?.[0], pendingCallParts, modelTurnParts)) {
                 sawOutputInAttempt = true;
-                pendingCallParts.push(part);
-                continue;
-              }
-              if (typeof part.text !== 'string' || part.text.length === 0) continue;
-              sawOutputInAttempt = true;
-              if (part.thought) {
-                writeSseEvent(res, 'thought', { delta: part.text });
-              } else {
-                emittedTextChars += part.text.length;
-                writeSseEvent(res, 'text', { delta: part.text });
               }
             }
-
-            const groundingChunks = candidate?.groundingMetadata?.groundingChunks;
-            if (Array.isArray(groundingChunks) && groundingChunks.length > 0) {
-              let added = false;
-              for (const gc of groundingChunks) {
-                const url = gc?.web?.uri?.trim();
-                if (!url || !isSafeHttpUrl(url) || seenSourceUrls.has(url)) continue;
-                seenSourceUrls.add(url);
-                const title = gc?.web?.title?.trim() || new URL(url).hostname;
-                collectedSources.push({ title, url });
-                added = true;
-              }
-              if (added) {
-                writeSseEvent(res, 'sources', { sources: collectedSources });
+          } else {
+            const response = await ai.models.generateContent({
+              model: plan.model,
+              contents: turnContents,
+              config: requestConfig,
+            });
+            if (!clientClosed) {
+              if (
+                processCandidate(
+                  response.candidates?.[0],
+                  pendingCallParts,
+                  modelTurnParts
+                )
+              ) {
+                sawOutputInAttempt = true;
+              } else if (typeof response.text === 'string' && response.text.length > 0) {
+                sawOutputInAttempt = true;
+                emittedTextChars += response.text.length;
+                writeSseEvent(res, 'text', { delta: response.text });
               }
             }
           }
 
           return { pendingCallParts, modelTurnParts };
         } catch (err) {
-          const { status } = extractGeminiError(err, '');
-          if (attempt === 0 && !sawOutputInAttempt && !clientClosed && status === 503) {
-            await new Promise((r) => setTimeout(r, 900));
+          lastErr = err;
+          if (sawOutputInAttempt || clientClosed) {
+            throw err;
+          }
+          const rawMsg = err instanceof Error ? err.message : '';
+          const unwrapped = unwrapJsonErrorMessage(rawMsg);
+          const rawStatus =
+            typeof (err as { status?: unknown })?.status === 'number'
+              ? (err as { status: number }).status
+              : 502;
+          const resolvedStatus = unwrapped.code ?? rawStatus;
+          const msgToCheck = unwrapped.message || rawMsg;
+
+          const canRetry =
+            isTransientOverloadError(resolvedStatus, msgToCheck) ||
+            (resolvedStatus === 400 && attemptIdx < streamAttempts.length - 1);
+
+          if (canRetry && attemptIdx < streamAttempts.length - 1) {
             continue;
           }
           throw err;
         }
       }
+      if (lastErr) throw lastErr;
       return { pendingCallParts: [], modelTurnParts: [] };
     };
 
@@ -1361,6 +1601,9 @@ async function createServer() {
           err,
           'Failed to generate a response. Please try again.'
         );
+        if (status === 429 || status === 503) {
+          noteClientOverloadCooldown(clientRateKey);
+        }
         writeSseEvent(res, 'error', { status, message });
       }
     } finally {

@@ -224,10 +224,10 @@ export const LiveVoiceOverlay: React.FC<LiveVoiceOverlayProps> = ({
         }
       });
 
-      // Stream frames at 1 FPS per Live API specification
+      // Stream frames every 2.5s to keep live vision responsive while reducing API rate
       frameTimerRef.current = window.setInterval(() => {
         captureAndSendFrame();
-      }, 1000);
+      }, 2500);
     },
     [captureAndSendFrame, stopVisualFeed]
   );
