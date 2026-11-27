@@ -1,9 +1,11 @@
+import crypto from 'crypto';
 import { createClient, type Session, type SupabaseClient, type User } from '@supabase/supabase-js';
 import type { Express, Request, Response } from 'express';
 import type { IncomingHttpHeaders } from 'http';
 import {
   authenticateLocalUser,
   claimFirstRunAdmin,
+  computeAdminLocalId,
   consumeWsTicket,
   createLocalStandardAccount,
   hasClaimedAdminOrEnvPasscode,
@@ -21,6 +23,9 @@ import {
 const ACCESS_COOKIE_NAME = 'hazel_sb_at';
 const REFRESH_COOKIE_NAME = 'hazel_sb_rt';
 const LOCAL_COOKIE_NAME = 'hazel_local_at';
+const LONG_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30; // 30 days
+const LOCAL_SLIDING_RENEW_AGE_MS = 1000 * 60 * 60 * 12; // Slide cookie after 12 hours
+const PROACTIVE_REFRESH_LEEWAY_SECONDS = 600; // Refresh Supabase access token if <10 min remaining
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 export interface AuthUserDTO {
@@ -187,7 +192,7 @@ function setAuthCookies(req: Request, res: Response, session: Session): void {
   const isHttps = isHttpsRequest(req);
   const accessTtl =
     typeof session.expires_in === 'number' && session.expires_in > 0
-      ? session.expires_in
+      ? Math.max(session.expires_in, 3600)
       : 3600;
   const cookies = [
     serializeCookie(ACCESS_COOKIE_NAME, session.access_token, accessTtl, isHttps),
@@ -195,7 +200,7 @@ function setAuthCookies(req: Request, res: Response, session: Session): void {
   ];
   if (session.refresh_token) {
     cookies.push(
-      serializeCookie(REFRESH_COOKIE_NAME, session.refresh_token, 60 * 60 * 24 * 7, isHttps)
+      serializeCookie(REFRESH_COOKIE_NAME, session.refresh_token, LONG_COOKIE_MAX_AGE_SECONDS, isHttps)
     );
   }
   res.setHeader('Set-Cookie', cookies);
@@ -204,7 +209,7 @@ function setAuthCookies(req: Request, res: Response, session: Session): void {
 function setLocalAuthCookie(req: Request, res: Response, token: string): void {
   const isHttps = isHttpsRequest(req);
   res.setHeader('Set-Cookie', [
-    serializeCookie(LOCAL_COOKIE_NAME, token, 60 * 60 * 24 * 7, isHttps),
+    serializeCookie(LOCAL_COOKIE_NAME, token, LONG_COOKIE_MAX_AGE_SECONDS, isHttps),
     serializeCookie(ACCESS_COOKIE_NAME, '', 0, isHttps),
     serializeCookie(REFRESH_COOKIE_NAME, '', 0, isHttps),
   ]);
@@ -314,6 +319,132 @@ async function withAuthTimeout<T>(
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+interface RefreshOutcome {
+  session: Session | null;
+  user: User | null;
+  permanentInvalid: boolean;
+  transientError: boolean;
+}
+
+const inflightRefreshByTokenHash = new Map<string, Promise<RefreshOutcome>>();
+const recentRefreshByTokenHash = new Map<string, { outcome: RefreshOutcome; expiresAt: number }>();
+const RECENT_REFRESH_CACHE_TTL_MS = 25_000;
+
+function hashRefreshToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function isPermanentInvalidTokenError(
+  err: { message?: string; status?: number } | null | undefined
+): boolean {
+  if (!err) return false;
+  const msg = (err.message || '').toLowerCase();
+  if (
+    msg.includes('invalid_grant') ||
+    msg.includes('refresh_token_not_found') ||
+    msg.includes('invalid refresh token') ||
+    msg.includes('already used') ||
+    msg.includes('session_not_found') ||
+    msg.includes('user_not_found') ||
+    msg.includes('bad_jwt') ||
+    msg.includes('user_banned') ||
+    msg.includes('user banned')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function getJwtExpirationSeconds(jwt: string): number | null {
+  try {
+    const parts = jwt.split('.');
+    if (parts.length !== 3 || !parts[1]) return null;
+    const decoded = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
+      exp?: unknown;
+    };
+    return typeof decoded.exp === 'number' ? decoded.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+async function refreshSessionCoalesced(
+  supabase: SupabaseClient,
+  refreshToken: string
+): Promise<RefreshOutcome> {
+  const key = hashRefreshToken(refreshToken);
+  const now = Date.now();
+
+  for (const [cachedKey, entry] of recentRefreshByTokenHash.entries()) {
+    if (entry.expiresAt <= now) {
+      recentRefreshByTokenHash.delete(cachedKey);
+    }
+  }
+
+  const cached = recentRefreshByTokenHash.get(key);
+  if (cached && cached.expiresAt > now && cached.outcome.session && cached.outcome.user) {
+    return cached.outcome;
+  }
+
+  const inflight = inflightRefreshByTokenHash.get(key);
+  if (inflight) {
+    return inflight;
+  }
+
+  const task = (async (): Promise<RefreshOutcome> => {
+    try {
+      const { data, error } = await withAuthTimeout(
+        supabase.auth.refreshSession({ refresh_token: refreshToken }),
+        12_000
+      );
+      if (!error && data.session && data.user && data.user.email) {
+        const outcome: RefreshOutcome = {
+          session: data.session,
+          user: data.user,
+          permanentInvalid: false,
+          transientError: false,
+        };
+        recentRefreshByTokenHash.set(key, {
+          outcome,
+          expiresAt: Date.now() + RECENT_REFRESH_CACHE_TTL_MS,
+        });
+        return outcome;
+      }
+
+      if (isPermanentInvalidTokenError(error)) {
+        return {
+          session: null,
+          user: null,
+          permanentInvalid: true,
+          transientError: false,
+        };
+      }
+
+      // e.g. 5xx, rate limit, or ambiguous upstream issue: preserve cookies
+      return {
+        session: null,
+        user: null,
+        permanentInvalid: false,
+        transientError: true,
+      };
+    } catch {
+      return {
+        session: null,
+        user: null,
+        permanentInvalid: false,
+        transientError: true,
+      };
+    }
+  })();
+
+  inflightRefreshByTokenHash.set(key, task);
+  try {
+    return await task;
+  } finally {
+    inflightRefreshByTokenHash.delete(key);
   }
 }
 
@@ -440,7 +571,7 @@ export async function resolveLiveSessionContext(
     bearer && !bearer.startsWith('hl1.') ? bearer : cookies[ACCESS_COOKIE_NAME] || null;
   if (supabase && sbToken) {
     try {
-      const { data, error } = await withAuthTimeout(supabase.auth.getUser(sbToken), 8_000);
+      const { data, error } = await withAuthTimeout(supabase.auth.getUser(sbToken), 12_000);
       if (!error && data.user && data.user.email && !isAccountSuspended(data.user.email)) {
         return {
           user: mapSupabaseUser(data.user),
@@ -470,30 +601,22 @@ export async function resolveRequestAuthContext(
   const refreshToken = cookies[REFRESH_COOKIE_NAME] || null;
   if (!refreshToken) return null;
 
-  try {
-    const { data, error } = await withAuthTimeout(
-      supabase.auth.refreshSession({
-        refresh_token: refreshToken,
-      }),
-      8_000
-    );
-    if (!error && data.session && data.user && data.user.email) {
-      if (isAccountSuspended(data.user.email)) {
-        if (res) clearAuthCookies(req, res);
-        return null;
-      }
-      if (res) {
-        setAuthCookies(req, res, data.session);
-      }
-      return {
-        user: mapSupabaseUser(data.user),
-        supabaseAccessToken: data.session.access_token,
-        supabase: createAuthenticatedSupabaseClient(data.session.access_token),
-      };
+  const outcome = await refreshSessionCoalesced(supabase, refreshToken);
+  if (outcome.session && outcome.user && outcome.user.email) {
+    if (isAccountSuspended(outcome.user.email)) {
+      if (res) clearAuthCookies(req, res);
+      return null;
     }
-  } catch {
-    // Fall through
+    if (res) {
+      setAuthCookies(req, res, outcome.session);
+    }
+    return {
+      user: mapSupabaseUser(outcome.user),
+      supabaseAccessToken: outcome.session.access_token,
+      supabase: createAuthenticatedSupabaseClient(outcome.session.access_token),
+    };
   }
+
   return null;
 }
 
@@ -505,8 +628,11 @@ export async function resolveRequestAuthUserFromRaw(
   return ctx ? ctx.user : null;
 }
 
-export async function resolveRequestAuthUser(req: Request): Promise<AuthUserDTO | null> {
-  const ctx = await resolveRequestAuthContext(req);
+export async function resolveRequestAuthUser(
+  req: Request,
+  res?: Response
+): Promise<AuthUserDTO | null> {
+  const ctx = await resolveRequestAuthContext(req, res);
   return ctx ? ctx.user : null;
 }
 
@@ -547,6 +673,16 @@ export function registerSupabaseAuthRoutes(app: Express): void {
           fullName: payload.fullName,
           provider: 'local',
         });
+        let activeToken = localToken;
+        if (Date.now() - payload.iat > LOCAL_SLIDING_RENEW_AGE_MS) {
+          const renewed = signLocalSessionToken({
+            id: dto.id,
+            email: dto.email,
+            fullName: dto.fullName,
+          });
+          activeToken = renewed.token;
+          setLocalAuthCookie(req, res, renewed.token);
+        }
         recordAccountActivity({
           id: dto.id,
           email: dto.email,
@@ -559,7 +695,7 @@ export function registerSupabaseAuthRoutes(app: Express): void {
           adminClaimed,
           adminBootstrapAvailable: !supabaseReady && !adminClaimed,
           user: dto,
-          accessToken: localToken,
+          accessToken: activeToken,
         });
         return;
       }
@@ -596,9 +732,11 @@ export function registerSupabaseAuthRoutes(app: Express): void {
       return;
     }
 
-    try {
-      if (accessToken) {
-        const { data, error } = await withAuthTimeout(supabase.auth.getUser(accessToken), 8_000);
+    let accessGetUserTransientError = false;
+
+    if (accessToken) {
+      try {
+        const { data, error } = await withAuthTimeout(supabase.auth.getUser(accessToken), 12_000);
         if (!error && data.user && data.user.email) {
           if (isAccountSuspended(data.user.email)) {
             clearAuthCookies(req, res);
@@ -611,6 +749,38 @@ export function registerSupabaseAuthRoutes(app: Express): void {
             });
             return;
           }
+
+          // Proactively rotate access/refresh tokens if access token is close to expiring
+          const expSeconds = getJwtExpirationSeconds(accessToken);
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          if (
+            refreshToken &&
+            expSeconds !== null &&
+            expSeconds - nowSeconds < PROACTIVE_REFRESH_LEEWAY_SECONDS
+          ) {
+            const proactive = await refreshSessionCoalesced(supabase, refreshToken);
+            if (proactive.session && proactive.user && proactive.user.email) {
+              setAuthCookies(req, res, proactive.session);
+              const refreshedDto = mapSupabaseUser(proactive.user);
+              recordAccountActivity({
+                id: refreshedDto.id,
+                email: refreshedDto.email,
+                fullName: refreshedDto.fullName,
+                provider: 'supabase',
+              });
+              res.json({
+                configured: true,
+                localAuthAvailable: true,
+                adminClaimed,
+                adminBootstrapAvailable: false,
+                user: refreshedDto,
+                accessToken: proactive.session.access_token,
+                expiresAt: proactive.session.expires_at ?? null,
+              });
+              return;
+            }
+          }
+
           const dto = mapSupabaseUser(data.user);
           recordAccountActivity({
             id: dto.id,
@@ -628,49 +798,73 @@ export function registerSupabaseAuthRoutes(app: Express): void {
           });
           return;
         }
-      }
-
-      if (refreshToken) {
-        const { data, error } = await withAuthTimeout(
-          supabase.auth.refreshSession({
-            refresh_token: refreshToken,
-          }),
-          8_000
-        );
-        if (!error && data.session && data.user && data.user.email) {
-          if (isAccountSuspended(data.user.email)) {
-            clearAuthCookies(req, res);
-            res.json({
-              configured: true,
-              localAuthAvailable: true,
-              adminClaimed,
-              adminBootstrapAvailable: false,
-              user: null,
-            });
-            return;
+        if (error && !isPermanentInvalidTokenError(error)) {
+          const msg = (error.message || '').toLowerCase();
+          if (!msg.includes('expired') && !msg.includes('invalid jwt') && !msg.includes('bad_jwt')) {
+            accessGetUserTransientError = true;
           }
-          setAuthCookies(req, res, data.session);
-          const dto = mapSupabaseUser(data.user);
-          recordAccountActivity({
-            id: dto.id,
-            email: dto.email,
-            fullName: dto.fullName,
-            provider: 'supabase',
-          });
+        }
+      } catch {
+        accessGetUserTransientError = true;
+      }
+    }
+
+    if (refreshToken) {
+      const outcome = await refreshSessionCoalesced(supabase, refreshToken);
+      if (outcome.session && outcome.user && outcome.user.email) {
+        if (isAccountSuspended(outcome.user.email)) {
+          clearAuthCookies(req, res);
           res.json({
             configured: true,
             localAuthAvailable: true,
             adminClaimed,
             adminBootstrapAvailable: false,
-            user: dto,
-            accessToken: data.session.access_token,
-            expiresAt: data.session.expires_at ?? null,
+            user: null,
           });
           return;
         }
+        setAuthCookies(req, res, outcome.session);
+        const dto = mapSupabaseUser(outcome.user);
+        recordAccountActivity({
+          id: dto.id,
+          email: dto.email,
+          fullName: dto.fullName,
+          provider: 'supabase',
+        });
+        res.json({
+          configured: true,
+          localAuthAvailable: true,
+          adminClaimed,
+          adminBootstrapAvailable: false,
+          user: dto,
+          accessToken: outcome.session.access_token,
+          expiresAt: outcome.session.expires_at ?? null,
+        });
+        return;
       }
-    } catch {
-      // Fall through to unauthenticated response
+
+      if (outcome.transientError) {
+        // Do NOT wipe cookies on timeouts / upstream blips
+        res.status(503).json({
+          configured: true,
+          localAuthAvailable: true,
+          adminClaimed,
+          adminBootstrapAvailable: false,
+          transient: true,
+          error: 'Temporary authentication check issue. Your session has been preserved.',
+        });
+        return;
+      }
+    } else if (accessGetUserTransientError) {
+      res.status(503).json({
+        configured: true,
+        localAuthAvailable: true,
+        adminClaimed,
+        adminBootstrapAvailable: false,
+        transient: true,
+        error: 'Temporary authentication check issue. Your session has been preserved.',
+      });
+      return;
     }
 
     if (cookies[ACCESS_COOKIE_NAME] || cookies[REFRESH_COOKIE_NAME] || cookies[LOCAL_COOKIE_NAME]) {
@@ -723,7 +917,7 @@ export function registerSupabaseAuthRoutes(app: Express): void {
     }
 
     const dto = buildAuthUserDTO({
-      id: `admin-${email}`,
+      id: computeAdminLocalId(claimed.admin.email),
       email: claimed.admin.email,
       fullName: claimed.admin.fullName,
       createdAt: new Date(claimed.admin.claimedAt).toISOString(),

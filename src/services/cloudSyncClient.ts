@@ -14,6 +14,7 @@ export type SyncBackend = 'supabase' | 'local' | 'guest';
 export interface CloudStateSnapshot {
   theme: ThemeMode;
   activeSessionId: string | null;
+  activeWorkspaceSessionId?: string | null;
   settings: Partial<AppSettings>;
   categories: ChatCategory[];
   sessions: ChatSession[];

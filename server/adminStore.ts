@@ -11,7 +11,7 @@ const STATE_FILE = path.resolve(DATA_DIR, 'admin-state.json');
 
 const DEFAULT_OWNER_EMAIL = 'benjamintennyson987@gmail.com';
 const MAX_AUDIT_ENTRIES = 250;
-const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 const WS_TICKET_TTL_MS = 60_000; // 60 seconds
 
 // Ephemeral fallback signing key when SESSION_SECRET is unset (never stored in files)
@@ -464,6 +464,11 @@ export function recordAuditEvent(params: {
   persistState(state);
 }
 
+export function computeAdminLocalId(email: string): string {
+  const normEmail = email.trim().toLowerCase();
+  return `admin-${crypto.createHash('sha256').update(normEmail).digest('hex').slice(0, 12)}`;
+}
+
 export function claimFirstRunAdmin(params: {
   email: string;
   password: string;
@@ -499,7 +504,7 @@ export function claimFirstRunAdmin(params: {
     state.adminEmails.push(normEmail);
   }
 
-  const adminId = `admin-${crypto.createHash('sha256').update(normEmail).digest('hex').slice(0, 12)}`;
+  const adminId = computeAdminLocalId(normEmail);
   const now = Date.now();
   state.accounts[normEmail] = {
     id: adminId,
@@ -582,7 +587,7 @@ export function authenticateLocalUser(
   // 1. Check ADMIN_PASSCODE env override when email is an admin email
   if (isEnvPasscodeConfigured() && isAdminEmail(normEmail)) {
     if (verifyEnvAdminPasscode(password)) {
-      const id = `admin-${crypto.createHash('sha256').update(normEmail).digest('hex').slice(0, 12)}`;
+      const id = computeAdminLocalId(normEmail);
       const existing = state.accounts[normEmail];
       const fullName = existing?.fullName || normEmail.split('@')[0] || 'Admin';
       recordAccountActivity({
@@ -611,7 +616,7 @@ export function authenticateLocalUser(
     if (!verifyPasswordScrypt(password, state.claimedAdmin.passwordHash)) {
       return { ok: false, status: 401, error: 'Incorrect email or password.' };
     }
-    const id = `admin-${crypto.createHash('sha256').update(normEmail).digest('hex').slice(0, 12)}`;
+    const id = computeAdminLocalId(normEmail);
     recordAccountActivity({
       id,
       email: normEmail,

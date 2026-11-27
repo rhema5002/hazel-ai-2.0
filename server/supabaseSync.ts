@@ -39,6 +39,7 @@ export interface SyncedCategory {
 
 export interface SyncedSession {
   id: string;
+  space?: 'chat' | 'workspace';
   title: string;
   pinned: boolean;
   categoryId?: string | null;
@@ -62,11 +63,36 @@ export interface SyncedReminder {
 export interface UserCloudSnapshot {
   theme: 'light' | 'dark';
   activeSessionId: string | null;
+  activeWorkspaceSessionId: string | null;
   settings: Record<string, unknown>;
   categories: SyncedCategory[];
   sessions: SyncedSession[];
   scheduledReminders: SyncedReminder[];
   memories: SyncedMemoryItem[];
+}
+
+const WORKSPACE_ACTIVE_SETTING_KEY = '__activeWorkspaceSessionId';
+
+function splitSettingsMetadata(raw: unknown): {
+  cleanSettings: Record<string, unknown>;
+  activeWorkspaceSessionId: string | null;
+} {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { cleanSettings: {}, activeWorkspaceSessionId: null };
+  }
+  const source = raw as Record<string, unknown>;
+  const cleanSettings: Record<string, unknown> = {};
+  let activeWorkspaceSessionId: string | null = null;
+  for (const [k, v] of Object.entries(source)) {
+    if (k === WORKSPACE_ACTIVE_SETTING_KEY) {
+      if (typeof v === 'string' && v.trim()) {
+        activeWorkspaceSessionId = v.trim().slice(0, 80);
+      }
+      continue;
+    }
+    cleanSettings[k] = v;
+  }
+  return { cleanSettings, activeWorkspaceSessionId };
 }
 
 const VALID_MEMORY_CATEGORIES = new Set<MemoryCategory>([
@@ -88,8 +114,8 @@ const VALID_CATEGORY_COLORS = new Set([
   'slate',
 ]);
 
-const MAX_SESSIONS = 60;
-const MAX_MESSAGES_PER_SESSION = 160;
+const MAX_SESSIONS = 120;
+const MAX_MESSAGES_PER_SESSION = 1000;
 const MAX_CATEGORIES = 30;
 const MAX_REMINDERS = 40;
 const MAX_MEMORIES = 120;
@@ -121,6 +147,7 @@ function createEmptySnapshot(): UserCloudSnapshot {
   return {
     theme: 'light',
     activeSessionId: null,
+    activeWorkspaceSessionId: null,
     settings: {},
     categories: [],
     sessions: [],
@@ -140,16 +167,19 @@ function readLocalUserSnapshot(userId: string): {
     }
     const raw = fs.readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw) as Partial<UserCloudSnapshot>;
+    const { cleanSettings, activeWorkspaceSessionId: embeddedWsId } =
+      splitSettingsMetadata(parsed.settings);
     return {
       exists: true,
       snapshot: {
         theme: parsed.theme === 'dark' ? 'dark' : 'light',
         activeSessionId:
           typeof parsed.activeSessionId === 'string' ? parsed.activeSessionId : null,
-        settings:
-          parsed.settings && typeof parsed.settings === 'object' && !Array.isArray(parsed.settings)
-            ? (parsed.settings as Record<string, unknown>)
-            : {},
+        activeWorkspaceSessionId:
+          typeof parsed.activeWorkspaceSessionId === 'string'
+            ? parsed.activeWorkspaceSessionId
+            : embeddedWsId,
+        settings: cleanSettings,
         categories: sanitizeCategories(parsed.categories),
         sessions: sanitizeSessions(parsed.sessions),
         scheduledReminders: sanitizeReminders(parsed.scheduledReminders),
@@ -205,16 +235,16 @@ function sanitizeMessage(raw: unknown): Record<string, unknown> | null {
   const role = rec.role === 'user' || rec.role === 'assistant' ? rec.role : null;
   if (!id || !role) return null;
 
-  const text = typeof rec.text === 'string' ? rec.text.slice(0, 80_000) : '';
+  const text = typeof rec.text === 'string' ? rec.text.slice(0, 1_000_000) : '';
   const thoughts =
     typeof rec.thoughts === 'string' && rec.thoughts.length > 0
-      ? rec.thoughts.slice(0, 40_000)
+      ? rec.thoughts.slice(0, 250_000)
       : undefined;
 
   let attachments: Array<Record<string, unknown>> | undefined;
   if (Array.isArray(rec.attachments) && rec.attachments.length > 0) {
     attachments = rec.attachments
-      .slice(0, 5)
+      .slice(0, 12)
       .filter((a): a is Record<string, unknown> => Boolean(a) && typeof a === 'object')
       .map((a) => ({
         id: typeof a.id === 'string' ? a.id.slice(0, 80) : '',
@@ -223,7 +253,7 @@ function sanitizeMessage(raw: unknown): Record<string, unknown> | null {
         kind: a.kind === 'image' || a.kind === 'pdf' ? a.kind : 'text',
         sizeBytes: typeof a.sizeBytes === 'number' ? a.sizeBytes : 0,
         ...(typeof a.textContent === 'string'
-          ? { textContent: a.textContent.slice(0, 24_000) }
+          ? { textContent: a.textContent.slice(0, 250_000) }
           : {}),
         ...(typeof a.base64Data === 'string' && a.base64Data.length <= 180_000
           ? { base64Data: a.base64Data }
@@ -272,12 +302,16 @@ function sanitizeSessions(raw: unknown): SyncedSession[] {
       .map(sanitizeMessage)
       .filter((m): m is Record<string, unknown> => m !== null);
 
+    const space: 'chat' | 'workspace' =
+      rec.space === 'workspace' || id.startsWith('ws_') ? 'workspace' : 'chat';
+
     out.push({
       id,
-      title: title || 'New chat',
+      space,
+      title: title || (space === 'workspace' ? 'New workspace' : 'New chat'),
       pinned: Boolean(rec.pinned),
       categoryId:
-        typeof rec.categoryId === 'string' && rec.categoryId.trim()
+        space === 'workspace' && typeof rec.categoryId === 'string' && rec.categoryId.trim()
           ? rec.categoryId.trim().slice(0, 80)
           : null,
       createdAt: typeof rec.createdAt === 'number' ? rec.createdAt : Date.now(),
@@ -692,18 +726,18 @@ async function fetchFullCloudSnapshot(ctx: RequestAuthContext): Promise<{
         scheduledReminders.length > 0 ||
         memories.length > 0;
 
+      const { cleanSettings, activeWorkspaceSessionId } = splitSettingsMetadata(
+        stateRow?.settings
+      );
+
       const snapshot: UserCloudSnapshot = {
         theme: stateRow?.theme === 'dark' ? 'dark' : 'light',
         activeSessionId:
           typeof stateRow?.active_session_id === 'string'
             ? stateRow.active_session_id
             : null,
-        settings:
-          stateRow?.settings &&
-          typeof stateRow.settings === 'object' &&
-          !Array.isArray(stateRow.settings)
-            ? (stateRow.settings as Record<string, unknown>)
-            : {},
+        activeWorkspaceSessionId,
+        settings: cleanSettings,
         categories,
         sessions,
         scheduledReminders,
@@ -754,6 +788,9 @@ async function saveFullOrPartialSnapshot(
   const hasTheme = payload.theme === 'light' || payload.theme === 'dark';
   const hasActiveSessionId =
     payload.activeSessionId === null || typeof payload.activeSessionId === 'string';
+  const hasActiveWorkspaceSessionId =
+    payload.activeWorkspaceSessionId === null ||
+    typeof payload.activeWorkspaceSessionId === 'string';
   const hasSettings =
     Boolean(payload.settings) &&
     typeof payload.settings === 'object' &&
@@ -763,14 +800,23 @@ async function saveFullOrPartialSnapshot(
   const hasReminders = Array.isArray(payload.scheduledReminders);
   const hasMemories = Array.isArray(payload.memories);
 
+  const cleanIncomingSettings = hasSettings
+    ? splitSettingsMetadata(payload.settings).cleanSettings
+    : localExisting.settings;
+
+  const nextActiveWorkspaceSessionId = hasActiveWorkspaceSessionId
+    ? typeof payload.activeWorkspaceSessionId === 'string'
+      ? payload.activeWorkspaceSessionId.trim().slice(0, 80) || null
+      : null
+    : localExisting.activeWorkspaceSessionId;
+
   const nextSnapshot: UserCloudSnapshot = {
     theme: hasTheme ? (payload.theme as 'light' | 'dark') : localExisting.theme,
     activeSessionId: hasActiveSessionId
       ? (payload.activeSessionId as string | null)
       : localExisting.activeSessionId,
-    settings: hasSettings
-      ? (payload.settings as Record<string, unknown>)
-      : localExisting.settings,
+    activeWorkspaceSessionId: nextActiveWorkspaceSessionId,
+    settings: cleanIncomingSettings,
     categories: hasCategories
       ? sanitizeCategories(payload.categories)
       : localExisting.categories,
@@ -796,14 +842,20 @@ async function saveFullOrPartialSnapshot(
   const userId = ctx.user.id;
   let schemaMissing = false;
 
-  // 1. User state (theme, active_session_id, settings)
-  if (hasTheme || hasActiveSessionId || hasSettings) {
+  // 1. User state (theme, active_session_id, settings + workspace active session ID)
+  if (hasTheme || hasActiveSessionId || hasActiveWorkspaceSessionId || hasSettings) {
+    const persistedSettings: Record<string, unknown> = {
+      ...nextSnapshot.settings,
+      ...(nextSnapshot.activeWorkspaceSessionId
+        ? { [WORKSPACE_ACTIVE_SETTING_KEY]: nextSnapshot.activeWorkspaceSessionId }
+        : {}),
+    };
     const { error } = await sb.from('hazel_user_state').upsert(
       {
         user_id: userId,
         theme: nextSnapshot.theme,
         active_session_id: nextSnapshot.activeSessionId,
-        settings: nextSnapshot.settings,
+        settings: persistedSettings,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'user_id' }

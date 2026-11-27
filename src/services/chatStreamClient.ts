@@ -54,7 +54,7 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
-const MAX_TEXT_CHARS = 48_000;
+const MAX_TEXT_CHARS = 250_000;
 
 export async function readFileAsAttachment(file: File): Promise<AttachmentItem> {
   if (file.size > MAX_FILE_BYTES) {
@@ -208,7 +208,7 @@ export async function streamChatResponse({
       view: view === 'workspace' ? 'workspace' : 'chat',
       skipTimerTool: Boolean(skipTimerTool),
       tzOffsetMinutes: new Date().getTimezoneOffset(),
-      ...(memories && memories.length > 0 ? { memories: memories.slice(0, 80) } : {}),
+      ...(memories && memories.length > 0 ? { memories: memories.slice(0, 120) } : {}),
     }),
     signal,
   });

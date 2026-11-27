@@ -3,6 +3,7 @@ import type {
   CategoryColor,
   ChatCategory,
   ChatSession,
+  ChatSpace,
   MemoryCategory,
   MemoryItem,
   ThemeMode,
@@ -12,6 +13,7 @@ import type {
 const SESSIONS_KEY = 'hazel_chat_sessions_v1';
 const CATEGORIES_KEY = 'hazel_chat_categories_v1';
 const ACTIVE_SESSION_KEY = 'hazel_active_session_v1';
+const ACTIVE_WORKSPACE_SESSION_KEY = 'hazel_active_workspace_session_v1';
 const THEME_KEY = 'hazel_theme_v1';
 const SETTINGS_KEY = 'hazel_settings_v1';
 const REMINDERS_KEY = 'hazel_scheduled_reminders_v1';
@@ -49,13 +51,26 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   speakReminderAlerts: true,
 };
 
-export function createNewSession(categoryId: string | null = null): ChatSession {
+export function inferSessionSpace(
+  session: Pick<ChatSession, 'id' | 'space'>
+): ChatSpace {
+  if (session.space === 'workspace' || session.id.startsWith('ws_')) {
+    return 'workspace';
+  }
+  return 'chat';
+}
+
+export function createNewSession(
+  categoryId: string | null = null,
+  space: ChatSpace = 'chat'
+): ChatSession {
   const now = Date.now();
   return {
-    id: generateId('chat'),
-    title: 'New chat',
+    id: generateId(space === 'workspace' ? 'ws' : 'chat'),
+    space,
+    title: space === 'workspace' ? 'New workspace' : 'New chat',
     pinned: false,
-    categoryId,
+    categoryId: space === 'workspace' ? categoryId : null,
     createdAt: now,
     updatedAt: now,
     messages: [],
@@ -126,23 +141,30 @@ export function loadSessions(): ChatSession[] {
           typeof s.title === 'string' &&
           Array.isArray(s.messages)
       )
-      .map((s) => ({
-        ...s,
-        pinned: Boolean(s.pinned),
-        categoryId: typeof s.categoryId === 'string' ? s.categoryId : null,
-        messages: s.messages.map((m) => ({
-          ...m,
-          isStreaming: false,
-          isThinking: false,
-        })),
-      }));
+      .map((s) => {
+        const space = inferSessionSpace(s);
+        return {
+          ...s,
+          space,
+          pinned: Boolean(s.pinned),
+          categoryId:
+            space === 'workspace' && typeof s.categoryId === 'string'
+              ? s.categoryId
+              : null,
+          messages: s.messages.map((m) => ({
+            ...m,
+            isStreaming: false,
+            isThinking: false,
+          })),
+        };
+      });
   } catch {
     return [];
   }
 }
 
 export function saveSessions(sessions: ChatSession[]): void {
-  const clean = sessions.slice(0, 60).map((session) => ({
+  const clean = sessions.slice(0, 120).map((session) => ({
     ...session,
     messages: session.messages.map((msg) => ({
       ...msg,
@@ -199,6 +221,22 @@ export function loadActiveSessionId(): string | null {
 export function saveActiveSessionId(id: string): void {
   try {
     localStorage.setItem(ACTIVE_SESSION_KEY, id);
+  } catch {
+    // Ignore storage write errors
+  }
+}
+
+export function loadActiveWorkspaceSessionId(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_WORKSPACE_SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function saveActiveWorkspaceSessionId(id: string): void {
+  try {
+    localStorage.setItem(ACTIVE_WORKSPACE_SESSION_KEY, id);
   } catch {
     // Ignore storage write errors
   }

@@ -110,11 +110,12 @@ export function useStandbyVoiceControl({
 
   // Detect first user interaction and pre-granted microphone permission for built-in auto-start
   useEffect(() => {
+    let cancelled = false;
     if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
       void navigator.permissions
         .query({ name: 'microphone' as PermissionName })
         .then((res) => {
-          if (res.state === 'granted') {
+          if (!cancelled && res.state === 'granted') {
             setMicPreGranted(true);
             micPreGrantedRef.current = true;
           }
@@ -122,7 +123,11 @@ export function useStandbyVoiceControl({
         .catch(() => {});
     }
 
-    if (hasGesture) return;
+    if (hasGesture) {
+      return () => {
+        cancelled = true;
+      };
+    }
 
     const markActive = () => {
       setHasGesture(true);
@@ -131,6 +136,7 @@ export function useStandbyVoiceControl({
     window.addEventListener('pointerdown', markActive, { once: true, capture: true });
     window.addEventListener('keydown', markActive, { once: true, capture: true });
     return () => {
+      cancelled = true;
       window.removeEventListener('pointerdown', markActive, true);
       window.removeEventListener('keydown', markActive, true);
     };

@@ -24,7 +24,12 @@ import {
   X,
 } from 'lucide-react';
 import type { AuthUser } from '../services/authClient';
-import type { CategoryColor, ChatCategory, ChatSession } from '../types/chat';
+import type {
+  CategoryColor,
+  ChatCategory,
+  ChatSession,
+  ChatSpace,
+} from '../types/chat';
 import type { AuthModalMode } from './AuthModal';
 import { PWAInstallButton } from './PWAInstallButton';
 import { SparkEmblem } from './SparkEmblem';
@@ -36,6 +41,8 @@ interface ChatSidebarProps {
   sessions: ChatSession[];
   categories: ChatCategory[];
   activeSessionId: string;
+  space?: ChatSpace;
+  isWorkspaceLockedView?: boolean;
   showFoldersAndFilters: boolean;
   isDesktopOpen: boolean;
   isMobileOpen: boolean;
@@ -207,6 +214,8 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
   sessions,
   categories,
   activeSessionId,
+  space = 'chat',
+  isWorkspaceLockedView = false,
   showFoldersAndFilters,
   isDesktopOpen,
   isMobileOpen,
@@ -228,6 +237,7 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
   onOpenAuth,
   onSignOut,
 }) => {
+  const isWorkspaceZone = space === 'workspace';
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<SidebarViewMode>('recent');
   const [activeFilter, setActiveFilter] = useState<CategoryFilter>('all');
@@ -252,6 +262,20 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
 
   const sidebarRootRef = useRef<HTMLDivElement>(null);
   const renameCancelledRef = useRef(false);
+
+  useEffect(() => {
+    setSearchQuery('');
+    setActiveFilter('all');
+    setShowFilterMenu(false);
+    setOpenMenuSessionId(null);
+    setShowMoveSubmenu(false);
+    setOpenMenuFolderId(null);
+    setEditingSessionId(null);
+    setFolderEditor(null);
+    if (!isWorkspaceZone) {
+      setViewMode('recent');
+    }
+  }, [isWorkspaceZone]);
 
   useEffect(() => {
     const onPointerDown = (e: MouseEvent) => {
@@ -508,7 +532,7 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
               }}
               onBlur={() => commitRenameSession(session.id)}
               aria-label="Rename conversation"
-              className="min-w-0 flex-1 bg-transparent px-1.5 py-1 text-[13px] text-slate-900 focus:outline-none dark:text-white"
+              className="min-w-0 flex-1 bg-transparent px-1.5 py-1 text-[13px] text-slate-900 placeholder:text-slate-400 focus:outline-none dark:text-white dark:placeholder:text-zinc-500 dark:caret-zinc-100"
             />
             <button
               type="button"
@@ -765,8 +789,14 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
         <div className="flex items-center gap-2 pl-1">
           <SparkEmblem size={26} />
           <span className="font-display text-[15px] font-semibold tracking-tight text-slate-900 dark:text-white">
-            {showFoldersAndFilters ? 'Workspace' : 'Chats'}
+            {isWorkspaceZone ? 'Workspace' : 'Chat Space'}
           </span>
+          <span
+            aria-hidden="true"
+            className={`h-2 w-2 rounded-full ${
+              isWorkspaceZone ? 'bg-rose-500' : 'bg-blue-500'
+            }`}
+          />
         </div>
 
         <button
@@ -784,6 +814,7 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
       </div>
 
       {/* Primary Action, Search & Workspace-Only Organization Controls */}
+      {!isWorkspaceLockedView && (
       <div className="space-y-2.5 border-b border-slate-200/75 px-3 pb-3 dark:border-zinc-800/80">
         <button
           type="button"
@@ -794,11 +825,19 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
           className="flex min-h-[38px] w-full items-center justify-between rounded-xl border border-slate-200/90 bg-white px-3 text-[13px] font-medium text-slate-900 shadow-2xs transition-colors hover:border-slate-300 hover:bg-slate-50/80 active:scale-[0.99] focus-visible:outline-2 focus-visible:outline-blue-600 dark:border-zinc-700/80 dark:bg-[#23252A] dark:text-zinc-100 dark:hover:border-zinc-600 dark:hover:bg-[#2A2C32]"
         >
           <span className="flex min-w-0 items-center gap-2">
-            <Plus className="h-4 w-4 shrink-0 text-blue-600 dark:text-blue-400" />
+            <Plus
+              className={`h-4 w-4 shrink-0 ${
+                isWorkspaceZone
+                  ? 'text-rose-600 dark:text-rose-400'
+                  : 'text-blue-600 dark:text-blue-400'
+              }`}
+            />
             <span className="truncate">
               {activeFilterCategory
                 ? `New in ${activeFilterCategory.name}`
-                : 'New chat'}
+                : isWorkspaceZone
+                  ? 'New workspace'
+                  : 'New chat'}
             </span>
           </span>
           {activeFilterCategory && (
@@ -821,8 +860,16 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search titles or messages…"
-            aria-label="Search conversations by title or content"
+            placeholder={
+              isWorkspaceZone
+                ? 'Search workspace projects…'
+                : 'Search titles or messages…'
+            }
+            aria-label={
+              isWorkspaceZone
+                ? 'Search workspace sessions by title or content'
+                : 'Search conversations by title or content'
+            }
             className="h-8 w-full rounded-lg border border-slate-200/80 bg-white/80 pr-7 pl-8 text-xs text-slate-800 placeholder:text-slate-400 focus:border-blue-500/60 focus:bg-white focus:outline-none dark:border-zinc-800 dark:bg-[#1F2125] dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-blue-500/60 dark:focus:bg-[#25272C]"
           />
           {searchQuery && (
@@ -1013,7 +1060,13 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
           <div className="flex items-center justify-between px-0.5 text-[11px] text-slate-500 dark:text-zinc-400">
             <span className="tabular-nums">
               {filteredSessions.length}{' '}
-              {filteredSessions.length === 1 ? 'conversation' : 'conversations'}
+              {isWorkspaceZone
+                ? filteredSessions.length === 1
+                  ? 'project'
+                  : 'projects'
+                : filteredSessions.length === 1
+                  ? 'conversation'
+                  : 'conversations'}
             </span>
             <button
               type="button"
@@ -1028,6 +1081,7 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
           </div>
         )}
       </div>
+      )}
 
       {/* Inline Folder Create / Edit Form (Workspace Only) */}
       {showFoldersAndFilters && folderEditor && (
@@ -1062,7 +1116,7 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
             }}
             placeholder="Folder name…"
             aria-label="Folder name"
-            className="mb-2 h-8 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-white dark:placeholder:text-zinc-500"
+            className="mb-2 h-8 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-white dark:placeholder:text-zinc-500 dark:focus:border-blue-400 dark:focus:bg-[#25272C]"
           />
 
           <div
@@ -1121,10 +1175,14 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
 
       {/* Conversation List */}
       <nav
-        aria-label="Conversation history"
+        aria-label={isWorkspaceZone ? 'Workspace history' : 'Conversation history'}
         className="chat-scroll flex-1 overflow-y-auto px-2.5 py-2.5"
       >
-        {showFoldersAndFilters && viewMode === 'folders' ? (
+        {isWorkspaceLockedView ? (
+          <div className="px-3 py-8 text-center text-xs leading-relaxed text-slate-500 dark:text-zinc-400">
+            Workspace is an independent zone reserved for administrators. Sign in as Admin to access your Workspace projects.
+          </div>
+        ) : showFoldersAndFilters && viewMode === 'folders' ? (
           <div className="space-y-2.5">
             {folderGroups.folders.map(({ category, items }) => {
               const style = CATEGORY_COLOR_STYLES[category.color];
@@ -1320,15 +1378,19 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
             {folderGroups.folders.length === 0 &&
               folderGroups.uncategorized.length === 0 && (
                 <p className="px-3 py-8 text-center text-xs text-slate-500 dark:text-zinc-500">
-                  No conversations match this filter.
+                  No workspace projects match this filter.
                 </p>
               )}
           </div>
         ) : timeGroups.length === 0 ? (
           <p className="px-3 py-8 text-center text-xs text-slate-500 dark:text-zinc-500">
             {trimmedSearch || (showFoldersAndFilters && resolvedFilter !== 'all')
-              ? 'No matching conversations found.'
-              : 'Your conversations will appear here.'}
+              ? isWorkspaceZone
+                ? 'No matching workspace projects found.'
+                : 'No matching conversations found.'
+              : isWorkspaceZone
+                ? 'Your workspace projects will appear here.'
+                : 'Your conversations will appear here.'}
           </p>
         ) : (
           <div className="space-y-4">

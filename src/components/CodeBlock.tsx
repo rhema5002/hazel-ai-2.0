@@ -447,7 +447,7 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
             sandbox="allow-scripts"
             title="Live code preview"
             srcDoc={previewSrcDoc}
-            className="h-64 w-full bg-white"
+            className="h-64 w-full bg-white dark:bg-[#16171A]"
           />
         </div>
       )}

@@ -3,6 +3,7 @@ import type { LiveConnectionState } from '../services/liveSessionClient';
 import type { AvatarGesture } from '../types/chat';
 
 export type LiveAvatarSize = 'sm' | 'md' | 'lg';
+export type LiveAvatarAppearance = 'blue' | 'red';
 
 interface LiveAvatar2DProps {
   status?: LiveConnectionState;
@@ -11,6 +12,7 @@ interface LiveAvatar2DProps {
   muted?: boolean;
   gesture?: AvatarGesture;
   size?: LiveAvatarSize;
+  appearance?: LiveAvatarAppearance;
   className?: string;
 }
 
@@ -85,8 +87,10 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
   muted = false,
   gesture = 'idle',
   size = 'lg',
+  appearance = 'blue',
   className = '',
 }) => {
+  const isRed = appearance === 'red';
   const uid = useId().replace(/:/g, '');
   const hairMainId = `hairMainGrad-${uid}`;
   const hairBackId = `hairBackGrad-${uid}`;
@@ -419,29 +423,37 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
       <div
         ref={auraRef}
         aria-hidden="true"
-        className="pointer-events-none absolute inset-4 rounded-full bg-gradient-to-tr from-blue-500/20 via-sky-400/15 to-indigo-500/20 blur-2xl transition-transform duration-150"
+        className={`pointer-events-none absolute inset-4 rounded-full bg-gradient-to-tr blur-2xl transition-transform duration-150 ${
+          isRed
+            ? 'from-rose-500/22 via-red-400/15 to-amber-500/15'
+            : 'from-blue-500/20 via-sky-400/15 to-indigo-500/20'
+        }`}
       />
 
       <svg
         viewBox="0 0 360 445"
-        className="relative h-full w-full drop-shadow-[0_14px_28px_rgba(37,99,235,0.16)]"
+        className={`relative h-full w-full ${
+          isRed
+            ? 'drop-shadow-[0_14px_28px_rgba(220,38,38,0.18)]'
+            : 'drop-shadow-[0_14px_28px_rgba(37,99,235,0.16)]'
+        }`}
         role="img"
-        aria-label="Hazel 2D animated character"
+        aria-label={isRed ? 'Workspace Hazel 2D animated character' : 'Hazel 2D animated character'}
       >
         <defs>
           <linearGradient id={hairMainId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#4377E0" />
-            <stop offset="55%" stopColor="#2A58BE" />
-            <stop offset="100%" stopColor="#1B3D8A" />
+            <stop offset="0%" stopColor={isRed ? '#EF4444' : '#4377E0'} />
+            <stop offset="55%" stopColor={isRed ? '#DC2626' : '#2A58BE'} />
+            <stop offset="100%" stopColor={isRed ? '#991B1B' : '#1B3D8A'} />
           </linearGradient>
           <linearGradient id={hairBackId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#2851AA" />
-            <stop offset="100%" stopColor="#152D6B" />
+            <stop offset="0%" stopColor={isRed ? '#B91C1C' : '#2851AA'} />
+            <stop offset="100%" stopColor={isRed ? '#6B1018' : '#152D6B'} />
           </linearGradient>
           <linearGradient id={irisId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#1D3D88" />
-            <stop offset="55%" stopColor="#3B7AE8" />
-            <stop offset="100%" stopColor="#85C7FF" />
+            <stop offset="0%" stopColor={isRed ? '#7F1D1D' : '#1D3D88'} />
+            <stop offset="55%" stopColor={isRed ? '#DC2626' : '#3B7AE8'} />
+            <stop offset="100%" stopColor={isRed ? '#FCA5A5' : '#85C7FF'} />
           </linearGradient>
           <linearGradient id={shirtId} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#FFFFFF" />
@@ -453,9 +465,9 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
             <stop offset="100%" stopColor="#A6B9D9" stopOpacity="0.78" />
           </linearGradient>
           <linearGradient id={skirtId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#2E4575" />
-            <stop offset="50%" stopColor="#23365E" />
-            <stop offset="100%" stopColor="#172442" />
+            <stop offset="0%" stopColor={isRed ? '#3F3F46' : '#2E4575'} />
+            <stop offset="50%" stopColor={isRed ? '#27272A' : '#23365E'} />
+            <stop offset="100%" stopColor={isRed ? '#18181B' : '#172442'} />
           </linearGradient>
           <clipPath id={leftEyeClipId}>
             <ellipse cx="145" cy="158" rx="19" ry="15.5" />
@@ -475,7 +487,7 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
               <path
                 d="M94 132 C82 182, 76 244, 88 286 C100 296, 114 282, 124 290 C142 298, 164 294, 180 298 C196 294, 218 298, 236 290 C246 282, 260 296, 272 286 C284 244, 278 182, 266 132 C254 74, 222 48, 180 48 C138 48, 106 74, 94 132 Z"
                 fill={`url(#${hairBackId})`}
-                stroke="#152447"
+                stroke={isRed ? '#450A0A' : '#152447'}
                 strokeWidth="2.8"
                 strokeLinejoin="round"
               />
@@ -539,7 +551,7 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
               <path
                 d="M141 356 L219 356 C225 374, 245 390, 245 415 C245 428, 243 442, 240 456 L120 456 C117 442, 115 428, 115 415 C115 390, 135 374, 141 356 Z"
                 fill={`url(#${skirtId})`}
-                stroke="#16213B"
+                stroke={isRed ? '#18181B' : '#16213B'}
                 strokeWidth="2.8"
                 strokeLinejoin="round"
               />
@@ -547,14 +559,14 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
               <path
                 d="M139 367 Q180 372 221 367"
                 fill="none"
-                stroke="#16213B"
+                stroke={isRed ? '#18181B' : '#16213B'}
                 strokeWidth="2.2"
                 strokeLinecap="round"
               />
               <path
                 d="M127 396 C122 406, 122 418, 125 429"
                 fill="none"
-                stroke="#5D7BB8"
+                stroke={isRed ? '#71717A' : '#5D7BB8'}
                 strokeWidth="2.2"
                 strokeLinecap="round"
                 opacity="0.55"
@@ -562,7 +574,7 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
               <path
                 d="M233 396 C238 406, 238 418, 235 429"
                 fill="none"
-                stroke="#5D7BB8"
+                stroke={isRed ? '#71717A' : '#5D7BB8'}
                 strokeWidth="2.2"
                 strokeLinecap="round"
                 opacity="0.55"
@@ -570,7 +582,7 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
               <path
                 d="M162 378 Q160 402 156 428"
                 fill="none"
-                stroke="#152038"
+                stroke={isRed ? '#141417' : '#152038'}
                 strokeWidth="1.8"
                 strokeLinecap="round"
                 opacity="0.55"
@@ -578,7 +590,7 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
               <path
                 d="M198 378 Q200 402 204 428"
                 fill="none"
-                stroke="#152038"
+                stroke={isRed ? '#141417' : '#152038'}
                 strokeWidth="1.8"
                 strokeLinecap="round"
                 opacity="0.55"
@@ -785,8 +797,8 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
                   {/* Left Iris & Pupil */}
                   <g clipPath={`url(#${leftEyeClipId})`}>
                     <g ref={leftIrisGroupRef}>
-                      <ellipse cx="145" cy="159" rx="12.4" ry="14" fill={`url(#${irisId})`} stroke="#172B5E" strokeWidth="1.6" />
-                      <ellipse cx="145" cy="160" rx="5.2" ry="6.2" fill="#111D3E" />
+                      <ellipse cx="145" cy="159" rx="12.4" ry="14" fill={`url(#${irisId})`} stroke={isRed ? '#450A0A' : '#172B5E'} strokeWidth="1.6" />
+                      <ellipse cx="145" cy="160" rx="5.2" ry="6.2" fill={isRed ? '#2A060B' : '#111D3E'} />
                       <circle cx="140" cy="153" r="3.6" fill="#FFFFFF" />
                       <circle cx="150" cy="165" r="1.8" fill="#FFFFFF" opacity="0.92" />
                     </g>
@@ -795,8 +807,8 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
                   {/* Right Iris & Pupil */}
                   <g clipPath={`url(#${rightEyeClipId})`}>
                     <g ref={rightIrisGroupRef}>
-                      <ellipse cx="215" cy="159" rx="12.4" ry="14" fill={`url(#${irisId})`} stroke="#172B5E" strokeWidth="1.6" />
-                      <ellipse cx="215" cy="160" rx="5.2" ry="6.2" fill="#111D3E" />
+                      <ellipse cx="215" cy="159" rx="12.4" ry="14" fill={`url(#${irisId})`} stroke={isRed ? '#450A0A' : '#172B5E'} strokeWidth="1.6" />
+                      <ellipse cx="215" cy="160" rx="5.2" ry="6.2" fill={isRed ? '#2A060B' : '#111D3E'} />
                       <circle cx="210" cy="153" r="3.6" fill="#FFFFFF" />
                       <circle cx="220" cy="165" r="1.8" fill="#FFFFFF" opacity="0.92" />
                     </g>
@@ -851,12 +863,12 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
                 </g>
               )}
 
-              {/* Soft Curved Blue Eyebrows */}
+              {/* Soft Curved Eyebrows */}
               <path
                 ref={leftBrowRef}
                 d="M127 134 Q145 126 162 133"
                 fill="none"
-                stroke="#244CA8"
+                stroke={isRed ? '#B91C1C' : '#244CA8'}
                 strokeWidth="2.8"
                 strokeLinecap="round"
               />
@@ -864,7 +876,7 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
                 ref={rightBrowRef}
                 d="M198 133 Q215 126 233 134"
                 fill="none"
-                stroke="#244CA8"
+                stroke={isRed ? '#B91C1C' : '#244CA8'}
                 strokeWidth="2.8"
                 strokeLinecap="round"
               />
@@ -969,7 +981,7 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
                 <path
                   d="M107 156 C99 110, 122 55, 180 55 C238 55, 261 110, 253 156 C260 196, 252 242, 234 268 C240 236, 241 190, 236 148 C230 124, 218 106, 206 100 C210 114, 204 128, 194 136 C198 118, 192 104, 182 96 C178 114, 166 128, 152 135 C158 118, 155 104, 148 96 C134 108, 124 128, 122 154 C119 192, 120 236, 126 268 C108 242, 100 196, 107 156 Z"
                   fill={`url(#${hairMainId})`}
-                  stroke="#152447"
+                  stroke={isRed ? '#450A0A' : '#152447'}
                   strokeWidth="2.8"
                   strokeLinejoin="round"
                 />
@@ -977,7 +989,7 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
                 <path
                   d="M138 86 Q156 76 174 84"
                   fill="none"
-                  stroke="#85BCFF"
+                  stroke={isRed ? '#FCA5A5' : '#85BCFF'}
                   strokeWidth="3.5"
                   strokeLinecap="round"
                   opacity="0.72"
@@ -985,7 +997,7 @@ export const LiveAvatar2D: React.FC<LiveAvatar2DProps> = ({
                 <path
                   d="M196 84 Q212 78 224 88"
                   fill="none"
-                  stroke="#85BCFF"
+                  stroke={isRed ? '#FCA5A5' : '#85BCFF'}
                   strokeWidth="3"
                   strokeLinecap="round"
                   opacity="0.68"

@@ -542,7 +542,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                           value={newAdminEmail}
                           onChange={(e) => setNewAdminEmail(e.target.value)}
                           placeholder="teammate@company.com"
-                          className="h-9 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-white dark:placeholder:text-zinc-500"
+                          className="h-9 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-white dark:placeholder:text-zinc-500 dark:focus:border-blue-400 dark:focus:bg-[#23252A]"
                         />
                       </div>
                       <button
@@ -568,7 +568,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                           onChange={(e) => setAccountQuery(e.target.value)}
                           placeholder="Search accounts by name or email…"
                           aria-label="Search accounts"
-                          className="h-9 w-full rounded-xl border border-slate-200 bg-white pr-3 pl-9 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-[#191B1F] dark:text-white dark:placeholder:text-zinc-500"
+                          className="h-9 w-full rounded-xl border border-slate-200 bg-white pr-3 pl-9 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-[#191B1F] dark:text-white dark:placeholder:text-zinc-500 dark:focus:border-blue-400 dark:focus:bg-[#222429]"
                         />
                       </div>
 

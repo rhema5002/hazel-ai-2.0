@@ -53,7 +53,9 @@ import {
   createNewSession,
   deriveSessionTitle,
   generateId,
+  inferSessionSpace,
   loadActiveSessionId,
+  loadActiveWorkspaceSessionId,
   loadCategories,
   loadMemories,
   loadScheduledReminders,
@@ -62,6 +64,7 @@ import {
   loadThemePreference,
   normalizeAppSettings,
   saveActiveSessionId,
+  saveActiveWorkspaceSessionId,
   saveCategories,
   saveMemories,
   saveScheduledReminders,
@@ -79,6 +82,7 @@ import {
 import {
   exchangeAuthCallback,
   fetchAuthSession,
+  isTransientAuthError,
   signOutSession,
   type AuthUser,
 } from './services/authClient';
@@ -107,6 +111,7 @@ import type {
   ChatCategory,
   ChatMessage,
   ChatSession,
+  ChatSpace,
   ChatWidget,
   CloudSyncStatus,
   MemoryCategory,
@@ -189,56 +194,36 @@ interface SpeechQueueState {
   pausedForIncoming: boolean;
 }
 
-export function App() {
-  const [sessions, setSessions] = useState<ChatSession[]>(() => {
-    const loaded = loadSessions();
-    return loaded.length > 0 ? loaded : [createNewSession()];
+function ensureBothSpaces(rawSessions: ChatSession[]): ChatSession[] {
+  const normalized: ChatSession[] = rawSessions.map((s) => {
+    const space = inferSessionSpace(s);
+    return {
+      ...s,
+      space,
+      categoryId: space === 'workspace' ? s.categoryId ?? null : null,
+    };
   });
+  const hasChat = normalized.some((s) => inferSessionSpace(s) === 'chat');
+  const hasWorkspace = normalized.some((s) => inferSessionSpace(s) === 'workspace');
+  const result: ChatSession[] = [...normalized];
+  if (!hasChat) {
+    result.push(createNewSession(null, 'chat'));
+  }
+  if (!hasWorkspace) {
+    result.push(createNewSession(null, 'workspace'));
+  }
+  return result;
+}
+
+export function App() {
+  const [sessions, setSessions] = useState<ChatSession[]>(() =>
+    ensureBothSpaces(loadSessions())
+  );
 
   const [categories, setCategories] = useState<ChatCategory[]>(() =>
     loadCategories()
   );
 
-  const [activeSessionId, setActiveSessionId] = useState<string>(() => {
-    const savedId = loadActiveSessionId();
-    const loaded = loadSessions();
-    if (savedId && loaded.some((s) => s.id === savedId)) {
-      return savedId;
-    }
-    return loaded[0]?.id ?? '';
-  });
-
-  // Ensure activeSessionId always points to an existing session
-  useEffect(() => {
-    if (!sessions.some((s) => s.id === activeSessionId)) {
-      setActiveSessionId(sessions[0].id);
-    }
-  }, [sessions, activeSessionId]);
-
-  const activeSession = useMemo(
-    () => sessions.find((s) => s.id === activeSessionId) ?? sessions[0],
-    [sessions, activeSessionId]
-  );
-
-  const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
-  const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
-  const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
-
-  const [composerValue, setComposerValue] = useState('');
-  const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
-  const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  const [mode, setMode] = useState<ReasoningMode>(
-    settings.defaultMode === 'coder' ? 'fast' : settings.defaultMode
-  );
-  const [webSearch, setWebSearch] = useState(settings.defaultWebSearch);
-
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [isLiveOpen, setIsLiveOpen] = useState(false);
-  const [isGalleryOpen, setIsGalleryOpen] = useState(false);
-  const [isCameraModalOpen, setIsCameraModalOpen] = useState(false);
-  const [isScreenModalOpen, setIsScreenModalOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authConfigured, setAuthConfigured] = useState(false);
   const [adminBootstrapAvailable, setAdminBootstrapAvailable] = useState(false);
@@ -246,6 +231,192 @@ export function App() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<AuthModalMode>('signin');
   const [authContextNotice, setAuthContextNotice] = useState<string | null>(null);
+  const [showWelcomePage, setShowWelcomePage] = useState(true);
+  const [appView, setAppView] = useState<AppView>('chat');
+
+  const isAdmin = Boolean(authUser?.isAdmin);
+  const currentSpace: ChatSpace =
+    appView === 'workspace' && isAdmin ? 'workspace' : 'chat';
+
+  const chatSessions = useMemo(
+    () => sessions.filter((s) => inferSessionSpace(s) === 'chat'),
+    [sessions]
+  );
+
+  const workspaceSessions = useMemo(
+    () => sessions.filter((s) => inferSessionSpace(s) === 'workspace'),
+    [sessions]
+  );
+
+  const [activeChatSessionId, setActiveChatSessionId] = useState<string>(() => {
+    const savedId = loadActiveSessionId();
+    const loadedChats = ensureBothSpaces(loadSessions()).filter(
+      (s) => inferSessionSpace(s) === 'chat'
+    );
+    if (savedId && loadedChats.some((s) => s.id === savedId)) {
+      return savedId;
+    }
+    return loadedChats[0]?.id ?? '';
+  });
+
+  const [activeWorkspaceSessionId, setActiveWorkspaceSessionId] = useState<string>(() => {
+    const savedId = loadActiveWorkspaceSessionId();
+    const loadedWorkspaces = ensureBothSpaces(loadSessions()).filter(
+      (s) => inferSessionSpace(s) === 'workspace'
+    );
+    if (savedId && loadedWorkspaces.some((s) => s.id === savedId)) {
+      return savedId;
+    }
+    return loadedWorkspaces[0]?.id ?? '';
+  });
+
+  // Ensure both Chat Space and Workspace always maintain at least one valid session
+  useEffect(() => {
+    if (chatSessions.length === 0 || workspaceSessions.length === 0) {
+      setSessions((prev) => ensureBothSpaces(prev));
+    }
+  }, [chatSessions.length, workspaceSessions.length]);
+
+  useEffect(() => {
+    if (
+      chatSessions.length > 0 &&
+      !chatSessions.some((s) => s.id === activeChatSessionId)
+    ) {
+      setActiveChatSessionId(chatSessions[0].id);
+    }
+  }, [chatSessions, activeChatSessionId]);
+
+  useEffect(() => {
+    if (
+      workspaceSessions.length > 0 &&
+      !workspaceSessions.some((s) => s.id === activeWorkspaceSessionId)
+    ) {
+      setActiveWorkspaceSessionId(workspaceSessions[0].id);
+    }
+  }, [workspaceSessions, activeWorkspaceSessionId]);
+
+  const activeChatSession = useMemo(
+    () =>
+      chatSessions.find((s) => s.id === activeChatSessionId) ??
+      chatSessions[0] ??
+      sessions[0],
+    [chatSessions, activeChatSessionId, sessions]
+  );
+
+  const activeWorkspaceSession = useMemo(
+    () =>
+      workspaceSessions.find((s) => s.id === activeWorkspaceSessionId) ??
+      workspaceSessions[0] ??
+      sessions[0],
+    [workspaceSessions, activeWorkspaceSessionId, sessions]
+  );
+
+  const activeSession =
+    currentSpace === 'workspace' ? activeWorkspaceSession : activeChatSession;
+
+  const scopedSessions = useMemo(
+    () =>
+      appView === 'workspace'
+        ? isAdmin
+          ? workspaceSessions
+          : []
+        : chatSessions,
+    [appView, isAdmin, workspaceSessions, chatSessions]
+  );
+
+  const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
+  const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
+  const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+
+  // Separate drafts, attachments & modes per section so Chat Space and Workspace are completely isolated
+  const [chatComposerValue, setChatComposerValue] = useState('');
+  const [workspaceComposerValue, setWorkspaceComposerValue] = useState('');
+  const [chatAttachments, setChatAttachments] = useState<AttachmentItem[]>([]);
+  const [workspaceAttachments, setWorkspaceAttachments] = useState<AttachmentItem[]>([]);
+  const [chatAttachmentError, setChatAttachmentError] = useState<string | null>(null);
+  const [workspaceAttachmentError, setWorkspaceAttachmentError] = useState<string | null>(null);
+  const [chatMode, setChatMode] = useState<ReasoningMode>(
+    settings.defaultMode === 'coder' ? 'fast' : settings.defaultMode
+  );
+  const [workspaceMode, setWorkspaceMode] = useState<ReasoningMode>(
+    settings.defaultMode === 'teacher' || settings.defaultMode === 'deep'
+      ? settings.defaultMode
+      : 'coder'
+  );
+  const [chatWebSearch, setChatWebSearch] = useState(settings.defaultWebSearch);
+  const [workspaceWebSearch, setWorkspaceWebSearch] = useState(settings.defaultWebSearch);
+
+  const composerValue =
+    currentSpace === 'workspace' ? workspaceComposerValue : chatComposerValue;
+  const setComposerValue = useCallback(
+    (next: React.SetStateAction<string>) => {
+      if (currentSpace === 'workspace') {
+        setWorkspaceComposerValue(next);
+      } else {
+        setChatComposerValue(next);
+      }
+    },
+    [currentSpace]
+  );
+
+  const attachments =
+    currentSpace === 'workspace' ? workspaceAttachments : chatAttachments;
+  const setAttachments = useCallback(
+    (next: React.SetStateAction<AttachmentItem[]>) => {
+      if (currentSpace === 'workspace') {
+        setWorkspaceAttachments(next);
+      } else {
+        setChatAttachments(next);
+      }
+    },
+    [currentSpace]
+  );
+
+  const attachmentError =
+    currentSpace === 'workspace' ? workspaceAttachmentError : chatAttachmentError;
+  const setAttachmentError = useCallback(
+    (next: React.SetStateAction<string | null>) => {
+      if (currentSpace === 'workspace') {
+        setWorkspaceAttachmentError(next);
+      } else {
+        setChatAttachmentError(next);
+      }
+    },
+    [currentSpace]
+  );
+
+  const mode = currentSpace === 'workspace' ? workspaceMode : chatMode;
+  const setMode = useCallback(
+    (next: React.SetStateAction<ReasoningMode>) => {
+      if (currentSpace === 'workspace') {
+        setWorkspaceMode(next);
+      } else {
+        setChatMode(next);
+      }
+    },
+    [currentSpace]
+  );
+
+  const webSearch =
+    currentSpace === 'workspace' ? workspaceWebSearch : chatWebSearch;
+  const setWebSearch = useCallback(
+    (next: React.SetStateAction<boolean>) => {
+      if (currentSpace === 'workspace') {
+        setWorkspaceWebSearch(next);
+      } else {
+        setChatWebSearch(next);
+      }
+    },
+    [currentSpace]
+  );
+
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [isLiveOpen, setIsLiveOpen] = useState(false);
+  const [isGalleryOpen, setIsGalleryOpen] = useState(false);
+  const [isCameraModalOpen, setIsCameraModalOpen] = useState(false);
+  const [isScreenModalOpen, setIsScreenModalOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [isQueueReading, setIsQueueReading] = useState(false);
   const [isQueuePaused, setIsQueuePaused] = useState(false);
@@ -253,11 +424,7 @@ export function App() {
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [standbyFeedback, setStandbyFeedback] = useState<string | null>(null);
   const [showStandbyHelp, setShowStandbyHelp] = useState(false);
-  const [showWelcomePage, setShowWelcomePage] = useState(true);
-  const [appView, setAppView] = useState<AppView>('chat');
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
-
-  const isAdmin = Boolean(authUser?.isAdmin);
 
   const [scheduledReminders, setScheduledReminders] = useState<StoredScheduledReminder[]>(
     () => loadScheduledReminders()
@@ -291,6 +458,9 @@ export function App() {
   const cloudHydratingRef = useRef<boolean>(false);
   const lastSyncedSignatureRef = useRef<string>('');
   const authSyncEpochRef = useRef(0);
+  const liveTargetSessionRef = useRef<{ sessionId: string; space: ChatSpace } | null>(null);
+  const sessionsRef = useRef<ChatSession[]>(sessions);
+  sessionsRef.current = sessions;
 
   const workspaceArtifacts = useMemo(
     () => extractWorkspaceArtifacts(activeSession.messages),
@@ -350,7 +520,7 @@ export function App() {
     return 'idle';
   }, [activeSession.messages, isStreaming]);
 
-  // Sync theme to document root & persist
+  // Sync theme to document root, native color-scheme, browser theme-color, & persist
   useEffect(() => {
     const root = document.documentElement;
     if (theme === 'dark') {
@@ -358,6 +528,20 @@ export function App() {
     } else {
       root.classList.remove('dark');
     }
+    root.style.colorScheme = theme;
+
+    const themeColorMetas = document.querySelectorAll('meta[name="theme-color"]');
+    themeColorMetas.forEach((meta) => {
+      const media = meta.getAttribute('media');
+      if (!media || meta.id === 'hazel-dynamic-theme-color') {
+        meta.setAttribute('content', theme === 'dark' ? '#131314' : '#FFFFFF');
+      }
+    });
+    const statusMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+    if (statusMeta) {
+      statusMeta.setAttribute('content', theme === 'dark' ? 'black-translucent' : 'default');
+    }
+
     saveThemePreference(theme);
   }, [theme]);
 
@@ -376,25 +560,38 @@ export function App() {
   }, [categories]);
 
   useEffect(() => {
-    if (activeSession?.id) {
-      saveActiveSessionId(activeSession.id);
+    if (activeChatSessionId) {
+      saveActiveSessionId(activeChatSessionId);
     }
-  }, [activeSession?.id]);
+  }, [activeChatSessionId]);
+
+  useEffect(() => {
+    if (activeWorkspaceSessionId) {
+      saveActiveWorkspaceSessionId(activeWorkspaceSessionId);
+    }
+  }, [activeWorkspaceSessionId]);
 
   useEffect(() => {
     saveMemories(memories);
   }, [memories]);
 
+  const lastAuthSyncAtRef = useRef<number>(0);
+
   const syncAuthSession = useCallback(async () => {
     const epoch = ++authSyncEpochRef.current;
+    lastAuthSyncAtRef.current = Date.now();
     try {
       const res = await fetchAuthSession();
       if (epoch !== authSyncEpochRef.current) return;
       setAuthConfigured(res.configured);
       setAdminBootstrapAvailable(res.adminBootstrapAvailable);
       setAuthUser(res.user);
-    } catch {
+    } catch (err) {
       if (epoch !== authSyncEpochRef.current) return;
+      if (isTransientAuthError(err)) {
+        // Keep current session intact during network/wake-up/server-start hiccups
+        return;
+      }
       setAuthUser(null);
     } finally {
       if (epoch === authSyncEpochRef.current) {
@@ -492,15 +689,50 @@ export function App() {
     };
   }, [syncAuthSession]);
 
+  // Keep session refreshed when returning to the app/tab, reconnecting, or every 20 minutes
+  useEffect(() => {
+    const refreshIfStale = (minIntervalMs = 60_000) => {
+      if (document.visibilityState === 'hidden') return;
+      if (Date.now() - lastAuthSyncAtRef.current < minIntervalMs) return;
+      void syncAuthSession();
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        refreshIfStale(60_000);
+      }
+    };
+    const onPageShow = () => {
+      refreshIfStale(30_000);
+    };
+    const onOnline = () => {
+      refreshIfStale(15_000);
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pageshow', onPageShow);
+    window.addEventListener('online', onOnline);
+    const keepAliveTimer = window.setInterval(() => {
+      refreshIfStale(15 * 60 * 1000);
+    }, 20 * 60 * 1000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pageshow', onPageShow);
+      window.removeEventListener('online', onOnline);
+      window.clearInterval(keepAliveTimer);
+    };
+  }, [syncAuthSession]);
+
   // Enforce Admin-only guard on Admin Panel and Pro Coder mode on client state
   useEffect(() => {
     if (!isAdmin && appView === 'admin') {
       setAppView('chat');
     }
-    if ((!isAdmin || appView !== 'workspace') && mode === 'coder') {
-      setMode('fast');
+    if (chatMode === 'coder') {
+      setChatMode('fast');
     }
-  }, [isAdmin, appView, mode]);
+  }, [isAdmin, appView, chatMode]);
 
   // Hydrate full web app state from Supabase when authenticated, or migrate local guest state on first login
   useEffect(() => {
@@ -531,7 +763,8 @@ export function App() {
           const payload = {
             theme,
             settings,
-            activeSessionId,
+            activeSessionId: activeChatSessionId,
+            activeWorkspaceSessionId,
             categories,
             sessions,
             scheduledReminders,
@@ -543,6 +776,7 @@ export function App() {
             theme: payload.theme,
             settings: payload.settings,
             activeSessionId: payload.activeSessionId,
+            activeWorkspaceSessionId: payload.activeWorkspaceSessionId,
             categories: payload.categories,
             sessions: payload.sessions,
             scheduledReminders: payload.scheduledReminders,
@@ -563,19 +797,30 @@ export function App() {
           const nextSettings = normalizeAppSettings(snap.settings);
           const nextCategories =
             snap.categories.length > 0 ? snap.categories : DEFAULT_CATEGORIES;
-          const nextSessions =
-            snap.sessions.length > 0 ? snap.sessions : [createNewSession()];
-          const nextActiveId =
+          const nextSessions = ensureBothSpaces(snap.sessions);
+          const nextChatList = nextSessions.filter(
+            (s) => inferSessionSpace(s) === 'chat'
+          );
+          const nextWorkspaceList = nextSessions.filter(
+            (s) => inferSessionSpace(s) === 'workspace'
+          );
+          const nextActiveChatId =
             snap.activeSessionId &&
-            nextSessions.some((s) => s.id === snap.activeSessionId)
+            nextChatList.some((s) => s.id === snap.activeSessionId)
               ? snap.activeSessionId
-              : nextSessions[0].id;
+              : nextChatList[0].id;
+          const nextActiveWorkspaceId =
+            snap.activeWorkspaceSessionId &&
+            nextWorkspaceList.some((s) => s.id === snap.activeWorkspaceSessionId)
+              ? snap.activeWorkspaceSessionId
+              : nextWorkspaceList[0].id;
           const nextReminders = snap.scheduledReminders;
 
           lastSyncedSignatureRef.current = JSON.stringify({
             theme: nextTheme,
             settings: nextSettings,
-            activeSessionId: nextActiveId,
+            activeSessionId: nextActiveChatId,
+            activeWorkspaceSessionId: nextActiveWorkspaceId,
             categories: nextCategories,
             sessions: nextSessions,
             scheduledReminders: nextReminders,
@@ -585,7 +830,8 @@ export function App() {
           setSettings(nextSettings);
           setCategories(nextCategories);
           setSessions(nextSessions);
-          setActiveSessionId(nextActiveId);
+          setActiveChatSessionId(nextActiveChatId);
+          setActiveWorkspaceSessionId(nextActiveWorkspaceId);
           setScheduledReminders(nextReminders);
           setMemories(snap.memories);
           setSyncStatus(
@@ -635,7 +881,8 @@ export function App() {
     const payload = {
       theme,
       settings,
-      activeSessionId,
+      activeSessionId: activeChatSessionId,
+      activeWorkspaceSessionId,
       categories,
       sessions,
       scheduledReminders,
@@ -674,7 +921,8 @@ export function App() {
     authUser,
     theme,
     settings,
-    activeSessionId,
+    activeChatSessionId,
+    activeWorkspaceSessionId,
     categories,
     sessions,
     scheduledReminders,
@@ -705,10 +953,16 @@ export function App() {
       hydratedUserIdRef.current = null;
       cloudHydratingRef.current = false;
       lastSyncedSignatureRef.current = '';
-      const fresh = createNewSession();
+      const freshChat = createNewSession(null, 'chat');
+      const freshWorkspace = createNewSession(null, 'workspace');
       setAuthUser(null);
-      setSessions([fresh]);
-      setActiveSessionId(fresh.id);
+      setSessions([freshChat, freshWorkspace]);
+      setActiveChatSessionId(freshChat.id);
+      setActiveWorkspaceSessionId(freshWorkspace.id);
+      setChatComposerValue('');
+      setWorkspaceComposerValue('');
+      setChatAttachments([]);
+      setWorkspaceAttachments([]);
       setCategories(DEFAULT_CATEGORIES);
       setScheduledReminders([]);
       setActiveAlerts([]);
@@ -717,7 +971,7 @@ export function App() {
       setLastSyncedAt(null);
       setSupabaseSchemaSql(null);
       setAppView((prev) => (prev === 'admin' ? 'chat' : prev));
-      setMode((prev) => (prev === 'coder' ? 'fast' : prev));
+      setChatMode('fast');
       void syncAuthSession();
     }
   }, [syncAuthSession]);
@@ -1205,7 +1459,14 @@ export function App() {
         dispatchBrowserReminderNotification(alert, () => {
           if (alert.sessionId) {
             setShowWelcomePage(false);
-            setActiveSessionId(alert.sessionId);
+            const matched = sessionsRef.current.find((s) => s.id === alert.sessionId);
+            if (matched && inferSessionSpace(matched) === 'workspace') {
+              setActiveWorkspaceSessionId(matched.id);
+              setAppView('workspace');
+            } else {
+              setActiveChatSessionId(alert.sessionId);
+              setAppView('chat');
+            }
           }
           dismissAlert(alert.id);
         });
@@ -1488,7 +1749,8 @@ export function App() {
       const payload = {
         theme,
         settings,
-        activeSessionId,
+        activeSessionId: activeChatSessionId,
+        activeWorkspaceSessionId,
         categories,
         sessions,
         scheduledReminders,
@@ -1499,6 +1761,7 @@ export function App() {
         theme: payload.theme,
         settings: payload.settings,
         activeSessionId: payload.activeSessionId,
+        activeWorkspaceSessionId: payload.activeWorkspaceSessionId,
         categories: payload.categories,
         sessions: payload.sessions,
         scheduledReminders: payload.scheduledReminders,
@@ -1515,7 +1778,16 @@ export function App() {
     } catch {
       setSyncStatus('error');
     }
-  }, [authUser, theme, settings, activeSessionId, categories, sessions, scheduledReminders]);
+  }, [
+    authUser,
+    theme,
+    settings,
+    activeChatSessionId,
+    activeWorkspaceSessionId,
+    categories,
+    sessions,
+    scheduledReminders,
+  ]);
 
   const runStreamForMessages = useCallback(
     async (
@@ -1649,22 +1921,44 @@ export function App() {
       if (!trimmed && stagedAttachments.length === 0) return;
       if (isStreaming && !options?.targetSession) return;
 
-      const sessionToUse = options?.targetSession ?? activeSession;
-      pauseSpeechQueueForIncoming(sessionToUse.id);
-
       const rawView: AppView = options?.view ?? appView;
       const targetView: AppView =
         rawView === 'workspace' && isAdmin ? 'workspace' : 'chat';
-      const rawTargetMode: ReasoningMode = options?.mode ?? mode;
+      const targetSpace: ChatSpace =
+        targetView === 'workspace' ? 'workspace' : 'chat';
+
+      const sessionToUse =
+        options?.targetSession ??
+        (targetSpace === 'workspace' ? activeWorkspaceSession : activeChatSession);
+      pauseSpeechQueueForIncoming(sessionToUse.id);
+
+      const currentSpaceMode = targetSpace === 'workspace' ? workspaceMode : chatMode;
+      const currentSpaceSearch =
+        targetSpace === 'workspace' ? workspaceWebSearch : chatWebSearch;
+      const rawTargetMode: ReasoningMode = options?.mode ?? currentSpaceMode;
       const targetMode: ReasoningMode =
         (targetView !== 'workspace' || !isAdmin) && rawTargetMode === 'coder'
           ? 'fast'
           : rawTargetMode;
       const targetSearch =
-        typeof options?.webSearch === 'boolean' ? options.webSearch : webSearch;
+        typeof options?.webSearch === 'boolean'
+          ? options.webSearch
+          : currentSpaceSearch;
 
-      if (options?.mode || targetMode !== rawTargetMode) setMode(targetMode);
-      if (typeof options?.webSearch === 'boolean') setWebSearch(options.webSearch);
+      if (options?.mode || targetMode !== rawTargetMode) {
+        if (targetSpace === 'workspace') {
+          setWorkspaceMode(targetMode);
+        } else {
+          setChatMode(targetMode);
+        }
+      }
+      if (typeof options?.webSearch === 'boolean') {
+        if (targetSpace === 'workspace') {
+          setWorkspaceWebSearch(options.webSearch);
+        } else {
+          setChatWebSearch(options.webSearch);
+        }
+      }
 
       const parsedTimer = trimmed ? parseNaturalTimerCommand(trimmed) : null;
       const nowMs = Date.now();
@@ -1709,7 +2003,8 @@ export function App() {
       const targetSessionId = sessionToUse.id;
       const nextHistory = [...sessionToUse.messages, userMsg];
       const shouldAutoTitle =
-        sessionToUse.messages.length === 0 && sessionToUse.title === 'New chat';
+        sessionToUse.messages.length === 0 &&
+        (sessionToUse.title === 'New chat' || sessionToUse.title === 'New workspace');
 
       setSessions((prev) =>
         prev.map((s) =>
@@ -1718,7 +2013,11 @@ export function App() {
             : {
                 ...s,
                 title: shouldAutoTitle
-                  ? deriveSessionTitle(trimmed || stagedAttachments[0]?.name || 'New chat')
+                  ? deriveSessionTitle(
+                      trimmed ||
+                        stagedAttachments[0]?.name ||
+                        (targetSpace === 'workspace' ? 'New workspace' : 'New chat')
+                    )
                   : s.title,
                 updatedAt: Date.now(),
                 messages: [...nextHistory, assistantMsg],
@@ -1726,9 +2025,15 @@ export function App() {
         )
       );
 
-      setComposerValue('');
-      setAttachments([]);
-      setAttachmentError(null);
+      if (targetSpace === 'workspace') {
+        setWorkspaceComposerValue('');
+        setWorkspaceAttachments([]);
+        setWorkspaceAttachmentError(null);
+      } else {
+        setChatComposerValue('');
+        setChatAttachments([]);
+        setChatAttachmentError(null);
+      }
 
       await runStreamForMessages(
         targetSessionId,
@@ -1741,15 +2046,18 @@ export function App() {
       );
     },
     [
-      activeSession,
+      activeChatSession,
+      activeWorkspaceSession,
       appView,
+      chatMode,
+      chatWebSearch,
       isAdmin,
       isStreaming,
-      mode,
-      webSearch,
       pauseSpeechQueueForIncoming,
       registerScheduledReminder,
       runStreamForMessages,
+      workspaceMode,
+      workspaceWebSearch,
     ]
   );
 
@@ -1761,41 +2069,77 @@ export function App() {
   const handleNewChat = useCallback(
     (
       categoryId: string | null = null,
-      opts?: { preserveModeAndSearch?: boolean }
+      opts?: { preserveModeAndSearch?: boolean; space?: ChatSpace }
     ): ChatSession => {
       if (isStreaming) {
         abortControllerRef.current?.abort();
         setIsStreaming(false);
       }
       stopSpeech();
+      const targetSpace: ChatSpace =
+        opts?.space ?? (appView === 'workspace' && isAdmin ? 'workspace' : 'chat');
+      const currentInSpace =
+        targetSpace === 'workspace' ? activeWorkspaceSession : activeChatSession;
       const nextDefaultMode: ReasoningMode =
-        (!isAdmin || appView !== 'workspace') && settings.defaultMode === 'coder'
-          ? 'fast'
-          : settings.defaultMode;
-      // If current chat is already blank and matches the requested category, simply focus it
+        targetSpace === 'workspace'
+          ? settings.defaultMode === 'teacher' || settings.defaultMode === 'deep'
+            ? settings.defaultMode
+            : 'coder'
+          : settings.defaultMode === 'coder'
+            ? 'fast'
+            : settings.defaultMode;
+      const resolvedCategoryId = targetSpace === 'workspace' ? categoryId : null;
+
+      // If current session in this zone is already blank and matches the requested category, focus it
       if (
-        activeSession.messages.length === 0 &&
-        (activeSession.categoryId ?? null) === (categoryId ?? null)
+        currentInSpace.messages.length === 0 &&
+        (currentInSpace.categoryId ?? null) === (resolvedCategoryId ?? null)
       ) {
         if (!opts?.preserveModeAndSearch) {
-          setMode(nextDefaultMode);
-          setWebSearch(settings.defaultWebSearch);
+          if (targetSpace === 'workspace') {
+            setWorkspaceMode(nextDefaultMode);
+            setWorkspaceWebSearch(settings.defaultWebSearch);
+          } else {
+            setChatMode(nextDefaultMode);
+            setChatWebSearch(settings.defaultWebSearch);
+          }
         }
-        return activeSession;
+        return currentInSpace;
       }
-      const fresh = createNewSession(categoryId);
+
+      const fresh = createNewSession(resolvedCategoryId, targetSpace);
       setSessions((prev) => [fresh, ...prev]);
-      setActiveSessionId(fresh.id);
-      setComposerValue('');
-      setAttachments([]);
-      setAttachmentError(null);
-      if (!opts?.preserveModeAndSearch) {
-        setMode(nextDefaultMode);
-        setWebSearch(settings.defaultWebSearch);
+      if (targetSpace === 'workspace') {
+        setActiveWorkspaceSessionId(fresh.id);
+        setWorkspaceComposerValue('');
+        setWorkspaceAttachments([]);
+        setWorkspaceAttachmentError(null);
+        if (!opts?.preserveModeAndSearch) {
+          setWorkspaceMode(nextDefaultMode);
+          setWorkspaceWebSearch(settings.defaultWebSearch);
+        }
+      } else {
+        setActiveChatSessionId(fresh.id);
+        setChatComposerValue('');
+        setChatAttachments([]);
+        setChatAttachmentError(null);
+        if (!opts?.preserveModeAndSearch) {
+          setChatMode(nextDefaultMode);
+          setChatWebSearch(settings.defaultWebSearch);
+        }
       }
       return fresh;
     },
-    [activeSession, appView, isAdmin, isStreaming, settings.defaultMode, settings.defaultWebSearch, stopSpeech]
+    [
+      activeChatSession,
+      activeWorkspaceSession,
+      appView,
+      isAdmin,
+      isStreaming,
+      settings.defaultMode,
+      settings.defaultWebSearch,
+      stopSpeech,
+    ]
   );
 
   const handleClearAllChats = useCallback(() => {
@@ -1804,29 +2148,73 @@ export function App() {
       setIsStreaming(false);
     }
     stopSpeech();
-    const fresh = createNewSession();
-    setSessions([fresh]);
-    setActiveSessionId(fresh.id);
-    setComposerValue('');
-    setAttachments([]);
-    setAttachmentError(null);
-    setMode(
-      (!isAdmin || appView !== 'workspace') && settings.defaultMode === 'coder'
-        ? 'fast'
-        : settings.defaultMode
+    const freshChat = createNewSession(null, 'chat');
+    const freshWorkspace = createNewSession(null, 'workspace');
+    setSessions([freshChat, freshWorkspace]);
+    setActiveChatSessionId(freshChat.id);
+    setActiveWorkspaceSessionId(freshWorkspace.id);
+    setChatComposerValue('');
+    setWorkspaceComposerValue('');
+    setChatAttachments([]);
+    setWorkspaceAttachments([]);
+    setChatAttachmentError(null);
+    setWorkspaceAttachmentError(null);
+    setChatMode(settings.defaultMode === 'coder' ? 'fast' : settings.defaultMode);
+    setWorkspaceMode(
+      settings.defaultMode === 'teacher' || settings.defaultMode === 'deep'
+        ? settings.defaultMode
+        : 'coder'
     );
-    setWebSearch(settings.defaultWebSearch);
-  }, [appView, isAdmin, isStreaming, stopSpeech, settings.defaultMode, settings.defaultWebSearch]);
+    setChatWebSearch(settings.defaultWebSearch);
+    setWorkspaceWebSearch(settings.defaultWebSearch);
+  }, [isStreaming, stopSpeech, settings.defaultMode, settings.defaultWebSearch]);
 
-  const handleSelectSession = (id: string) => {
-    if (id === activeSession.id) return;
-    if (isStreaming) {
-      handleStopStreaming();
-    }
-    stopSpeech();
-    setActiveSessionId(id);
-    autoScrollEnabledRef.current = true;
-  };
+  const handleSelectSession = useCallback(
+    (id: string) => {
+      const target = sessionsRef.current.find((s) => s.id === id);
+      const targetSpace: ChatSpace = target
+        ? inferSessionSpace(target)
+        : currentSpace;
+
+      if (targetSpace === 'workspace' && !isAdmin) {
+        setAppView('workspace');
+        return;
+      }
+
+      const currentActiveForTarget =
+        targetSpace === 'workspace'
+          ? activeWorkspaceSessionId
+          : activeChatSessionId;
+
+      if (id !== currentActiveForTarget) {
+        if (isStreaming) {
+          abortControllerRef.current?.abort();
+          setIsStreaming(false);
+        }
+        stopSpeech();
+      }
+
+      if (targetSpace === 'workspace') {
+        setActiveWorkspaceSessionId(id);
+        setAppView('workspace');
+      } else {
+        setActiveChatSessionId(id);
+        if (appView === 'workspace' || appView === 'admin') {
+          setAppView('chat');
+        }
+      }
+      autoScrollEnabledRef.current = true;
+    },
+    [
+      activeChatSessionId,
+      activeWorkspaceSessionId,
+      appView,
+      currentSpace,
+      isAdmin,
+      isStreaming,
+      stopSpeech,
+    ]
+  );
 
   const handleDeleteSession = (id: string) => {
     if (id === activeSession.id && isStreaming) {
@@ -1834,14 +2222,32 @@ export function App() {
     }
     stopSpeech();
     setSessions((prev) => {
+      const target = prev.find((s) => s.id === id);
+      const targetSpace: ChatSpace = target
+        ? inferSessionSpace(target)
+        : currentSpace;
       const remaining = prev.filter((s) => s.id !== id);
-      if (remaining.length === 0) {
-        const fresh = createNewSession();
-        setActiveSessionId(fresh.id);
-        return [fresh];
+      const remainingInSpace = remaining.filter(
+        (s) => inferSessionSpace(s) === targetSpace
+      );
+
+      if (remainingInSpace.length === 0) {
+        const fresh = createNewSession(null, targetSpace);
+        if (targetSpace === 'workspace') {
+          setActiveWorkspaceSessionId(fresh.id);
+        } else {
+          setActiveChatSessionId(fresh.id);
+        }
+        return [fresh, ...remaining];
       }
-      if (id === activeSession.id) {
-        setActiveSessionId(remaining[0].id);
+
+      if (
+        targetSpace === 'workspace' &&
+        id === activeWorkspaceSessionId
+      ) {
+        setActiveWorkspaceSessionId(remainingInSpace[0].id);
+      } else if (targetSpace === 'chat' && id === activeChatSessionId) {
+        setActiveChatSessionId(remainingInSpace[0].id);
       }
       return remaining;
     });
@@ -1992,7 +2398,8 @@ export function App() {
         };
         const targetId = activeSession.id;
         const shouldAutoTitle =
-          activeSession.messages.length === 0 && activeSession.title === 'New chat';
+          activeSession.messages.length === 0 &&
+          (activeSession.title === 'New chat' || activeSession.title === 'New workspace');
 
         setSessions((prev) =>
           prev.map((s) =>
@@ -2055,13 +2462,17 @@ export function App() {
           setIsStreaming(false);
         }
         stopSpeech();
+        liveTargetSessionRef.current = {
+          sessionId: activeSession.id,
+          space: currentSpace,
+        };
         setIsLiveOpen(true);
         return;
       }
 
       if (command.type === 'new_chat') {
         let targetCat: ChatCategory | undefined;
-        if (command.folderQuery) {
+        if (command.folderQuery && currentSpace === 'workspace') {
           const q = command.folderQuery.toLowerCase();
           targetCat = categories.find(
             (c) =>
@@ -2071,15 +2482,23 @@ export function App() {
         }
         handleNewChat(targetCat?.id ?? null);
         announceStandbyAction(
-          targetCat ? `New chat in ${targetCat.name}` : 'Started new chat',
-          targetCat ? `Started a new chat in ${targetCat.name}` : 'New chat'
+          targetCat
+            ? `New workspace in ${targetCat.name}`
+            : currentSpace === 'workspace'
+              ? 'Started new workspace'
+              : 'Started new chat',
+          targetCat
+            ? `Started a new workspace in ${targetCat.name}`
+            : currentSpace === 'workspace'
+              ? 'New workspace'
+              : 'New chat'
         );
         return;
       }
 
       if (command.type === 'switch_chat') {
         const q = command.query.toLowerCase();
-        const match = [...sessions]
+        const match = [...scopedSessions]
           .sort((a, b) => b.updatedAt - a.updatedAt)
           .find((s) => s.title.toLowerCase().includes(q));
         if (match) {
@@ -2175,6 +2594,7 @@ export function App() {
       appView,
       attachments,
       categories,
+      currentSpace,
       dismissAllAlerts,
       handleAssignCategory,
       handleNewChat,
@@ -2184,8 +2604,10 @@ export function App() {
       isAdmin,
       isStreaming,
       registerScheduledReminder,
+      scopedSessions,
       sendPrompt,
-      sessions,
+      setMode,
+      setWebSearch,
       stopSpeech,
     ]
   );
@@ -2322,6 +2744,10 @@ export function App() {
   const handleOpenLiveMode = () => {
     if (isStreaming) handleStopStreaming();
     stopSpeech();
+    liveTargetSessionRef.current = {
+      sessionId: activeSession.id,
+      space: currentSpace,
+    };
     setIsLiveOpen(true);
   };
 
@@ -2330,8 +2756,11 @@ export function App() {
     liveTimers: TimerWidgetData[]
   ) => {
     setIsLiveOpen(false);
+    const capturedTarget = liveTargetSessionRef.current;
+    liveTargetSessionRef.current = null;
     if (transcriptTurns.length === 0 && liveTimers.length === 0) return;
 
+    const targetSessionId = capturedTarget?.sessionId ?? activeSession.id;
     const now = Date.now();
     const newMsgs: ChatMessage[] = transcriptTurns.map((turn, i) => ({
       id: generateId(turn.role === 'user' ? 'usr' : 'ast'),
@@ -2365,23 +2794,23 @@ export function App() {
     }
 
     const firstUserTurn = transcriptTurns.find((t) => t.role === 'user');
-    const shouldAutoTitle =
-      activeSession.messages.length === 0 && activeSession.title === 'New chat';
 
     setSessions((prev) =>
-      prev.map((s) =>
-        s.id !== activeSession.id
-          ? s
-          : {
-              ...s,
-              title:
-                shouldAutoTitle && firstUserTurn
-                  ? deriveSessionTitle(firstUserTurn.text)
-                  : s.title,
-              updatedAt: now,
-              messages: [...s.messages, ...newMsgs],
-            }
-      )
+      prev.map((s) => {
+        if (s.id !== targetSessionId) return s;
+        const shouldAutoTitle =
+          s.messages.length === 0 &&
+          (s.title === 'New chat' || s.title === 'New workspace');
+        return {
+          ...s,
+          title:
+            shouldAutoTitle && firstUserTurn
+              ? deriveSessionTitle(firstUserTurn.text)
+              : s.title,
+          updatedAt: now,
+          messages: [...s.messages, ...newMsgs],
+        };
+      })
     );
   };
 
@@ -2412,7 +2841,7 @@ export function App() {
     dragDepthRef.current = 0;
     setIsDraggingFiles(false);
     if (e.dataTransfer?.files?.length) {
-      if (showWelcomePage || appView === 'admin') {
+      if (showWelcomePage || appView === 'admin' || (appView === 'workspace' && !isAdmin)) {
         setShowWelcomePage(false);
         setAppView('chat');
       }
@@ -2625,20 +3054,25 @@ export function App() {
         <LandingWelcomePage
           theme={theme}
           avatarGesture={hazelGesture}
-          hasExistingChats={hasMessages || sessions.length > 1}
-          latestChatTitle={activeSession.title}
+          hasExistingChats={
+            activeChatSession.messages.length > 0 || chatSessions.length > 1
+          }
+          latestChatTitle={activeChatSession.title}
           authUser={authUser}
           authLoading={authLoading}
           adminBootstrapAvailable={adminBootstrapAvailable}
           onChangeTheme={setTheme}
           onEnterChat={(opts) => {
             const targetSession = opts?.startNew
-              ? handleNewChat(null, { preserveModeAndSearch: Boolean(opts?.mode) })
+              ? handleNewChat(null, {
+                  preserveModeAndSearch: Boolean(opts?.mode),
+                  space: 'chat',
+                })
               : undefined;
             if (opts?.mode && opts.mode !== 'coder') {
-              setMode(opts.mode);
+              setChatMode(opts.mode);
             } else {
-              setMode((prev) => (prev === 'coder' ? 'fast' : prev));
+              setChatMode((prev) => (prev === 'coder' ? 'fast' : prev));
             }
             setAppView('chat');
             setShowWelcomePage(false);
@@ -2669,14 +3103,16 @@ export function App() {
         <>
           {/* History Sidebar */}
           <ChatSidebar
-            sessions={sessions}
+            sessions={scopedSessions}
             categories={categories}
             activeSessionId={activeSession.id}
+            space={appView === 'workspace' ? 'workspace' : 'chat'}
+            isWorkspaceLockedView={appView === 'workspace' && !isAdmin}
             showFoldersAndFilters={appView === 'workspace' && isAdmin}
             isDesktopOpen={isDesktopSidebarOpen}
             isMobileOpen={isMobileSidebarOpen}
             onSelectSession={handleSelectSession}
-            onNewChat={handleNewChat}
+            onNewChat={(catId) => handleNewChat(catId)}
             onDeleteSession={handleDeleteSession}
             onRenameSession={handleRenameSession}
             onTogglePinSession={handleTogglePinSession}
@@ -2745,11 +3181,11 @@ export function App() {
                 type="button"
                 onClick={() => {
                   setAppView('chat');
-                  setMode((prev) => (prev === 'coder' ? 'fast' : prev));
+                  setChatMode((prev) => (prev === 'coder' ? 'fast' : prev));
                 }}
                 aria-pressed={appView === 'chat'}
-                aria-label="Chat mode"
-                title="Chat"
+                aria-label="Chat Space"
+                title="Chat Space"
                 className={`inline-flex min-h-[30px] items-center gap-1 rounded-full px-2 text-[11.5px] font-medium whitespace-nowrap transition-colors sm:gap-1.5 sm:px-3 sm:text-xs ${
                   appView === 'chat'
                     ? 'bg-white text-slate-900 shadow-xs dark:bg-[#2D2F31] dark:text-white'
@@ -2763,11 +3199,11 @@ export function App() {
                 type="button"
                 onClick={() => setAppView('workspace')}
                 aria-pressed={appView === 'workspace'}
-                aria-label={isAdmin ? 'Workspace mode' : 'Workspace locked'}
+                aria-label={isAdmin ? 'Workspace zone' : 'Workspace locked'}
                 title={isAdmin ? 'Workspace' : 'Workspace (Locked — Admin only)'}
                 className={`inline-flex min-h-[30px] items-center gap-1 rounded-full px-2 text-[11.5px] font-medium whitespace-nowrap transition-colors sm:gap-1.5 sm:px-3 sm:text-xs ${
                   appView === 'workspace'
-                    ? 'bg-white text-slate-900 shadow-xs dark:bg-[#2D2F31] dark:text-white'
+                    ? 'bg-white text-rose-700 shadow-xs dark:bg-[#2D2F31] dark:text-rose-300'
                     : 'text-slate-600 hover:text-slate-900 dark:text-zinc-400 dark:hover:text-zinc-200'
                 }`}
               >
@@ -2777,11 +3213,13 @@ export function App() {
                   <Lock className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
                 )}
                 <span>Workspace</span>
-                {isAdmin && workspaceArtifacts.length > 0 && (
-                  <span className="font-mono text-[10.5px] opacity-70 tabular-nums">
-                    {workspaceArtifacts.length}
-                  </span>
-                )}
+                {isAdmin &&
+                  appView === 'workspace' &&
+                  workspaceArtifacts.length > 0 && (
+                    <span className="font-mono text-[10.5px] opacity-70 tabular-nums">
+                      {workspaceArtifacts.length}
+                    </span>
+                  )}
               </button>
               {isAdmin && (
                 <button
@@ -3237,7 +3675,12 @@ export function App() {
         defaultVoice={settings.liveVoice}
         view={appView === 'workspace' && isAdmin ? 'workspace' : 'chat'}
         guestMemories={!authUser ? memories : undefined}
-        onScheduleTimer={(timer) => registerScheduledReminder(timer, activeSession.id)}
+        onScheduleTimer={(timer) =>
+          registerScheduledReminder(
+            timer,
+            liveTargetSessionRef.current?.sessionId ?? activeSession.id
+          )
+        }
         onMemoryEvent={applyMemoryEvent}
         onClose={handleCloseLiveMode}
       />
@@ -3245,8 +3688,9 @@ export function App() {
       {/* Media Gallery Modal */}
       <MediaGalleryModal
         isOpen={isGalleryOpen}
+        space={currentSpace}
         activeSession={activeSession}
-        allSessions={sessions}
+        allSessions={scopedSessions}
         onClose={() => setIsGalleryOpen(false)}
         onPromptSample={(prompt) => {
           setIsGalleryOpen(false);

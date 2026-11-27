@@ -377,7 +377,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       value={fullName}
                       onChange={(e) => setFullName(e.target.value)}
                       placeholder={mode === 'claim_admin' ? 'Owner Admin' : 'Alex Rivera'}
-                      className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pr-3 pl-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-white dark:placeholder:text-zinc-500"
+                      className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pr-3 pl-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-white dark:placeholder:text-zinc-500 dark:focus:border-blue-400 dark:focus:bg-[#23252A]"
                     />
                   </div>
                 </div>
@@ -404,7 +404,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       placeholder="you@example.com"
-                      className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pr-3 pl-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-white dark:placeholder:text-zinc-500"
+                      className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pr-3 pl-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-white dark:placeholder:text-zinc-500 dark:focus:border-blue-400 dark:focus:bg-[#23252A]"
                     />
                   </div>
                 </div>
@@ -456,7 +456,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           ? 'At least 8 characters'
                           : 'Enter your password'
                       }
-                      className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pr-10 pl-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-white dark:placeholder:text-zinc-500"
+                      className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pr-10 pl-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-white dark:placeholder:text-zinc-500 dark:focus:border-blue-400 dark:focus:bg-[#23252A]"
                     />
                     <button
                       type="button"
@@ -497,7 +497,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
                       placeholder="Re-enter new password"
-                      className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pr-3 pl-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-white dark:placeholder:text-zinc-500"
+                      className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pr-3 pl-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-white dark:placeholder:text-zinc-500 dark:focus:border-blue-400 dark:focus:bg-[#23252A]"
                     />
                   </div>
                 </div>

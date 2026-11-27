@@ -472,19 +472,29 @@ export const LiveVoiceOverlay: React.FC<LiveVoiceOverlayProps> = ({
                   ? 'Listening & seeing via camera'
                   : 'Listening — speak naturally';
 
+  const isWorkspaceLive = view === 'workspace';
+
   return (
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Hazel Live voice and visual conversation"
-      className="fixed inset-0 z-50 flex h-[100dvh] flex-col bg-gradient-to-b from-[#F8FAFD] via-white to-[#EEF3FC] text-slate-900 dark:from-[#131314] dark:via-[#16181D] dark:to-[#0E1118] dark:text-zinc-100"
+      aria-label={
+        isWorkspaceLive
+          ? 'Workspace Hazel Live voice and visual conversation'
+          : 'Hazel Live voice and visual conversation'
+      }
+      className={`fixed inset-0 z-50 flex h-[100dvh] flex-col bg-gradient-to-b text-slate-900 dark:text-zinc-100 ${
+        isWorkspaceLive
+          ? 'from-[#FDF8F8] via-white to-[#FDEEEE] dark:from-[#131314] dark:via-[#181416] dark:to-[#180E10]'
+          : 'from-[#F8FAFD] via-white to-[#EEF3FC] dark:from-[#131314] dark:via-[#16181D] dark:to-[#0E1118]'
+      }`}
     >
       {/* Top Bar */}
       <div className="flex shrink-0 items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2 sm:px-6">
         <div className="flex items-center gap-2.5">
           <SparkEmblem size={28} streaming={status === 'speaking' || status === 'connecting'} />
           <span className="font-display text-base font-semibold tracking-tight">
-            Hazel Live
+            {isWorkspaceLive ? 'Workspace Live' : 'Hazel Live'}
           </span>
         </div>
 
@@ -493,7 +503,14 @@ export const LiveVoiceOverlay: React.FC<LiveVoiceOverlayProps> = ({
             Voice persona
           </label>
           <div className="inline-flex items-center gap-1.5 rounded-full border border-slate-200/90 bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-700 dark:border-zinc-700/80 dark:bg-[#1E1F20] dark:text-zinc-200">
-            <Volume2 className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" aria-hidden="true" />
+            <Volume2
+              className={`h-3.5 w-3.5 ${
+                isWorkspaceLive
+                  ? 'text-rose-600 dark:text-rose-400'
+                  : 'text-blue-600 dark:text-blue-400'
+              }`}
+              aria-hidden="true"
+            />
             <select
               id="live-voice-select"
               value={voice}
@@ -570,6 +587,7 @@ export const LiveVoiceOverlay: React.FC<LiveVoiceOverlayProps> = ({
             outputLevel={levels.output}
             muted={muted}
             gesture={liveGesture}
+            appearance={isWorkspaceLive ? 'red' : 'blue'}
             size="lg"
           />
           <p

@@ -675,13 +675,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   placeholder="Add something for Hazel to remember…"
                   aria-label="Add memory for Hazel"
                   maxLength={500}
-                  className="h-9 min-w-[180px] flex-1 rounded-xl border border-slate-200 bg-white px-3 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-white dark:placeholder:text-zinc-500"
+                  className="h-9 min-w-[180px] flex-1 rounded-xl border border-slate-200 bg-white px-3 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-white dark:placeholder:text-zinc-500 dark:focus:border-blue-400 dark:focus:bg-[#222429]"
                 />
                 <select
                   value={memoryCategory}
                   onChange={(e) => setMemoryCategory(e.target.value as MemoryCategory)}
                   aria-label="Memory category"
-                  className="h-9 rounded-xl border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                  className="h-9 rounded-xl border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-zinc-200"
                 >
                   {MEMORY_CATEGORIES.map((cat) => (
                     <option key={cat.value} value={cat.value}>
@@ -713,7 +713,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onChange={(e) => setMemoryQuery(e.target.value)}
                 placeholder="Filter saved memories…"
                 aria-label="Filter saved memories"
-                className="h-8 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-800 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                className="h-8 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-800 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-blue-400 dark:focus:bg-[#222429]"
               />
             )}
 
@@ -781,7 +781,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onClick={() => onChangeTheme('light')}
                 className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3 text-xs font-medium transition-colors ${
                   theme === 'light'
-                    ? 'bg-white text-slate-900 shadow-xs'
+                    ? 'bg-white text-slate-900 shadow-xs dark:bg-zinc-700 dark:text-white'
                     : 'text-slate-600 hover:text-slate-900 dark:text-zinc-400 dark:hover:text-zinc-200'
                 }`}
               >
@@ -1065,7 +1065,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     update('liveVoice', e.target.value as LiveVoiceName)
                   }
                   aria-label="Default Hazel Live voice"
-                  className="bg-transparent text-xs font-medium text-slate-800 focus:outline-none dark:bg-zinc-800 dark:text-zinc-100"
+                  className="bg-transparent text-xs font-medium text-slate-800 focus:outline-none dark:bg-[#18191C] dark:text-zinc-100"
                 >
                   {LIVE_VOICES.map((v) => (
                     <option key={v.id} value={v.id}>
@@ -1143,7 +1143,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       id="hazel-speech-voice-select"
                       value={settings.speechVoiceURI}
                       onChange={(e) => update('speechVoiceURI', e.target.value)}
-                      className="h-9 w-full rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-800 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      className="h-9 w-full rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-800 focus:border-blue-500 focus:outline-none dark:border-zinc-700 dark:bg-[#18191C] dark:text-zinc-100"
                     >
                       <option value="">System default voice</option>
                       {sortedVoices.map((voice, idx) => (

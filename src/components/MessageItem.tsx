@@ -95,7 +95,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                   setEditDraft(message.text);
                 }
               }}
-              className="w-full resize-y bg-transparent text-[15px] leading-relaxed text-slate-900 focus:outline-none dark:text-zinc-100"
+              className="w-full resize-y bg-transparent text-[15px] leading-relaxed text-slate-900 placeholder:text-slate-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:caret-zinc-100"
             />
             <div className="mt-2.5 flex items-center justify-end gap-2">
               <button

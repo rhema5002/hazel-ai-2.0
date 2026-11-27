@@ -2,6 +2,15 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  :root.dark,
+  html.dark {
+    color-scheme: dark;
+  }
+
   html,
   body,
   #root {
@@ -11,6 +20,42 @@
     overflow: hidden;
     font-family: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
     -webkit-tap-highlight-color: transparent;
+  }
+
+  html.dark,
+  html.dark body,
+  html.dark #root {
+    background-color: #131314;
+    color: #f4f4f5;
+    color-scheme: dark;
+  }
+
+  /* Ensure all text inputs, textareas, selects, and browser type-pad surfaces stay dark */
+  html.dark input,
+  html.dark textarea,
+  html.dark select {
+    color-scheme: dark;
+    caret-color: #f4f4f5;
+  }
+
+  html.dark select option,
+  html.dark select optgroup {
+    background-color: #1e1f22;
+    color: #f4f4f5;
+  }
+
+  html.dark input:-webkit-autofill,
+  html.dark input:-webkit-autofill:hover,
+  html.dark input:-webkit-autofill:focus,
+  html.dark textarea:-webkit-autofill,
+  html.dark textarea:-webkit-autofill:hover,
+  html.dark textarea:-webkit-autofill:focus,
+  html.dark select:-webkit-autofill {
+    -webkit-text-fill-color: #ffffff;
+    -webkit-box-shadow: 0 0 0 1000px #18191c inset;
+    box-shadow: 0 0 0 1000px #18191c inset;
+    caret-color: #ffffff;
+    transition: background-color 9999s ease-out 0s;
   }
 
   .font-display {

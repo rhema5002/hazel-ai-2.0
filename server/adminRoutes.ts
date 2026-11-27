@@ -25,7 +25,7 @@ async function requireAdmin(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  const user = await resolveRequestAuthUser(req);
+  const user = await resolveRequestAuthUser(req, res);
   if (!user) {
     res.status(401).json({
       error: 'Administrator sign-in is required to access the Admin Panel.',

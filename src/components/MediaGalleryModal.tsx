@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import type {
   ChatSession,
+  ChatSpace,
   ImageWidgetData,
   VideoWidgetData,
 } from '../types/chat';
@@ -33,6 +34,7 @@ type GalleryItem =
 
 interface MediaGalleryModalProps {
   isOpen: boolean;
+  space?: ChatSpace;
   activeSession: ChatSession;
   allSessions: ChatSession[];
   onClose: () => void;
@@ -343,6 +345,7 @@ const LightboxVideoPlayer: React.FC<{ data: VideoWidgetData }> = ({ data }) => {
 
 export const MediaGalleryModal: React.FC<MediaGalleryModalProps> = ({
   isOpen,
+  space = 'chat',
   activeSession,
   allSessions,
   onClose,
@@ -404,11 +407,17 @@ export const MediaGalleryModal: React.FC<MediaGalleryModalProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 px-5 py-4 dark:border-zinc-800">
           <div>
             <h2 className="font-display text-lg font-semibold text-slate-900 dark:text-white">
-              Media Gallery
+              {space === 'workspace' ? 'Workspace Media Gallery' : 'Media Gallery'}
             </h2>
             <p className="text-xs text-slate-500 dark:text-zinc-400">
               {items.length} {items.length === 1 ? 'item' : 'items'} ·{' '}
-              {scope === 'session' ? 'Current session' : 'All chats'}
+              {scope === 'session'
+                ? space === 'workspace'
+                  ? 'Current workspace'
+                  : 'Current session'
+                : space === 'workspace'
+                  ? 'All workspaces'
+                  : 'All chats'}
             </p>
           </div>
 
@@ -423,7 +432,7 @@ export const MediaGalleryModal: React.FC<MediaGalleryModalProps> = ({
                     : 'text-slate-600 hover:text-slate-900 dark:text-zinc-400 dark:hover:text-zinc-200'
                 }`}
               >
-                Current chat
+                {space === 'workspace' ? 'Current workspace' : 'Current chat'}
               </button>
               <button
                 type="button"
@@ -434,7 +443,7 @@ export const MediaGalleryModal: React.FC<MediaGalleryModalProps> = ({
                     : 'text-slate-600 hover:text-slate-900 dark:text-zinc-400 dark:hover:text-zinc-200'
                 }`}
               >
-                All chats
+                {space === 'workspace' ? 'All workspaces' : 'All chats'}
               </button>
             </div>
 

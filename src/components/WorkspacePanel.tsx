@@ -505,8 +505,8 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({
                         Organize projects into folders on the left, filter by topic, and build complete AI systems, web apps, or websites with live preview and file export here.
                       </p>
                     </div>
-                    <div className="shrink-0 rounded-2xl border border-slate-200/80 bg-gradient-to-b from-blue-50/80 to-white/75 px-3 pt-2 shadow-2xs dark:border-zinc-800 dark:from-blue-950/25 dark:to-[#1C1D20]">
-                      <LiveAvatar2D size="sm" gesture={avatarGesture} />
+                    <div className="shrink-0 rounded-2xl border border-rose-200/80 bg-gradient-to-b from-rose-50/80 to-white/75 px-3 pt-2 shadow-2xs dark:border-rose-900/40 dark:from-rose-950/25 dark:to-[#1C1D20]">
+                      <LiveAvatar2D size="sm" gesture={avatarGesture} appearance="red" />
                     </div>
                   </div>
 
@@ -569,7 +569,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({
                   sandbox="allow-scripts"
                   title={`Workspace split preview: ${activeArtifact.title}`}
                   srcDoc={previewDoc}
-                  className="h-full min-h-[320px] w-full flex-1 rounded-xl border border-slate-200/90 bg-white shadow-sm md:min-h-0 dark:border-zinc-700"
+                  className="h-full min-h-[320px] w-full flex-1 rounded-xl border border-slate-200/90 bg-white shadow-sm md:min-h-0 dark:border-zinc-700 dark:bg-[#16171A]"
                 />
               ) : (
                 <div className="chat-scroll flex-1 overflow-y-auto rounded-2xl bg-white p-3 sm:p-4 dark:bg-[#131314]">
@@ -602,7 +602,7 @@ export const WorkspacePanel: React.FC<WorkspacePanelProps> = ({
                 sandbox="allow-scripts"
                 title={`Workspace preview: ${activeArtifact.title}`}
                 srcDoc={previewDoc}
-                className="h-full w-full rounded-xl border border-slate-200/90 bg-white shadow-sm dark:border-zinc-700"
+                className="h-full w-full rounded-xl border border-slate-200/90 bg-white shadow-sm dark:border-zinc-700 dark:bg-[#16171A]"
               />
             </div>
           </div>

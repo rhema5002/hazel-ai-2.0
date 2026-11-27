@@ -103,6 +103,24 @@ function buildAuthHeaders(extra?: Record<string, string>): Record<string, string
   return headers;
 }
 
+export class AuthSessionTransientError extends Error {
+  readonly isTransient = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthSessionTransientError';
+  }
+}
+
+export function isTransientAuthError(err: unknown): boolean {
+  return Boolean(
+    err &&
+      typeof err === 'object' &&
+      'isTransient' in err &&
+      (err as { isTransient?: unknown }).isTransient === true
+  );
+}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
@@ -117,9 +135,13 @@ async function fetchWithTimeout(
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error('Sign-in request timed out. Please check your connection and try again.');
+      throw new AuthSessionTransientError(
+        'Sign-in request timed out. Please check your connection and try again.'
+      );
     }
-    throw new Error('Unable to reach the server right now. Please try again.');
+    throw new AuthSessionTransientError(
+      'Unable to reach the server right now. Please try again.'
+    );
   } finally {
     window.clearTimeout(timer);
   }
@@ -160,7 +182,7 @@ async function parseJsonPayload<T>(response: Response, fallbackError: string): P
   }
 }
 
-export async function fetchAuthSession(): Promise<AuthSessionResult> {
+async function requestAuthSessionOnce(): Promise<AuthSessionResult> {
   const response = await fetchWithTimeout('/api/auth/session', {
     method: 'GET',
     credentials: 'same-origin',
@@ -169,7 +191,11 @@ export async function fetchAuthSession(): Promise<AuthSessionResult> {
   });
 
   if (!response.ok) {
-    throw new Error(await parseErrorMessage(response, 'Unable to check authentication session.'));
+    const msg = await parseErrorMessage(response, 'Unable to check authentication session.');
+    if (response.status >= 500 || response.status === 429 || response.status === 408) {
+      throw new AuthSessionTransientError(msg);
+    }
+    throw new Error(msg);
   }
 
   const data = await parseJsonPayload<{
@@ -179,7 +205,12 @@ export async function fetchAuthSession(): Promise<AuthSessionResult> {
     adminBootstrapAvailable?: boolean;
     user?: AuthUser | null;
     accessToken?: string;
+    transient?: boolean;
   }>(response, 'Unable to verify authentication session.');
+
+  if (data.transient) {
+    throw new AuthSessionTransientError('Temporary authentication check issue.');
+  }
 
   if (typeof data.accessToken === 'string' && data.accessToken) {
     inMemoryAccessToken = data.accessToken;
@@ -194,6 +225,18 @@ export async function fetchAuthSession(): Promise<AuthSessionResult> {
     adminBootstrapAvailable: Boolean(data.adminBootstrapAvailable),
     user: data.user ?? null,
   };
+}
+
+export async function fetchAuthSession(): Promise<AuthSessionResult> {
+  try {
+    return await requestAuthSessionOnce();
+  } catch (err) {
+    if (!isTransientAuthError(err)) {
+      throw err;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 900));
+    return await requestAuthSessionOnce();
+  }
 }
 
 export async function signInWithEmail(email: string, password: string): Promise<AuthUser> {

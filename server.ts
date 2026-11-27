@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
+  FinishReason,
   GoogleGenAI,
   Modality,
   ThinkingLevel,
@@ -165,6 +166,7 @@ async function generateContentWithRetry(
   const attempts: Array<{ model: string; delayMs: number }> = [
     { model: params.model, delayMs: 0 },
     { model: alternateModel, delayMs: 900 },
+    { model: params.model, delayMs: 2000 },
   ];
 
   let lastErr: unknown;
@@ -215,54 +217,14 @@ const ALLOWED_IMAGE_MIMES = new Set([
   'image/webp',
   'image/gif',
 ]);
-const MAX_ATTACHMENT_COUNT = 5;
+const MAX_ATTACHMENT_COUNT = 12;
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
-const MAX_TEXT_ATTACHMENT_CHARS = 24_000;
-const MAX_TURN_TEXT_CHARS = 16_000;
-const MAX_HISTORY_TURNS = 14;
-
-const CHAT_RATE_WINDOW_MS = 60_000;
-const CHAT_MAX_REQUESTS_PER_WINDOW = 10;
-const CHAT_MIN_INTERVAL_MS = 1500;
-const CHAT_OVERLOAD_COOLDOWN_MS = 4000;
-const chatRateTracker = new Map<
-  string,
-  { timestamps: number[]; lastRequestAt: number; cooldownUntil: number }
->();
-
-function checkClientChatRateLimit(clientKey: string): string | null {
-  const now = Date.now();
-  const entry = chatRateTracker.get(clientKey) ?? {
-    timestamps: [],
-    lastRequestAt: 0,
-    cooldownUntil: 0,
-  };
-  if (now < entry.cooldownUntil) {
-    const waitSec = Math.max(1, Math.ceil((entry.cooldownUntil - now) / 1000));
-    return `Free-tier API is cooling down after high demand. Please wait ${waitSec}s and try again.`;
-  }
-  if (entry.lastRequestAt > 0 && now - entry.lastRequestAt < CHAT_MIN_INTERVAL_MS) {
-    return 'Please wait a moment before sending another message.';
-  }
-  entry.timestamps = entry.timestamps.filter((ts) => now - ts < CHAT_RATE_WINDOW_MS);
-  if (entry.timestamps.length >= CHAT_MAX_REQUESTS_PER_WINDOW) {
-    return 'Rate limit protection: please wait a few seconds before sending more messages on the free tier.';
-  }
-  entry.timestamps.push(now);
-  entry.lastRequestAt = now;
-  chatRateTracker.set(clientKey, entry);
-  return null;
-}
-
-function noteClientOverloadCooldown(clientKey: string): void {
-  const entry = chatRateTracker.get(clientKey) ?? {
-    timestamps: [],
-    lastRequestAt: Date.now(),
-    cooldownUntil: 0,
-  };
-  entry.cooldownUntil = Date.now() + CHAT_OVERLOAD_COOLDOWN_MS;
-  chatRateTracker.set(clientKey, entry);
-}
+const MAX_TEXT_ATTACHMENT_CHARS = 250_000;
+const MAX_TURN_TEXT_CHARS = 500_000;
+const MAX_HISTORY_TURNS = 500;
+const MAX_TOTAL_HISTORY_CHARS = 1_200_000;
+const MAX_STREAM_CONTINUATIONS = 24;
+const CONTINUATION_CONTEXT_CHARS = 600_000;
 
 function sanitizeFilename(rawName: unknown, fallback: string): string {
   if (typeof rawName !== 'string') return fallback;
@@ -390,9 +352,11 @@ function validateTurns(
   }
 
   const sliced = rawMessages.slice(-MAX_HISTORY_TURNS);
-  const turns: IncomingTurn[] = [];
+  const parsedReversed: IncomingTurn[] = [];
+  let totalHistoryChars = 0;
 
-  for (const item of sliced) {
+  for (let idx = sliced.length - 1; idx >= 0; idx--) {
+    const item = sliced[idx];
     if (!item || typeof item !== 'object') {
       return { ok: false, error: 'Invalid message entry.' };
     }
@@ -412,13 +376,29 @@ function validateTurns(
       continue;
     }
 
-    turns.push({
+    const turnCharCost =
+      text.length +
+      attachCheck.items.reduce(
+        (sum, att) => sum + (att.textContent ? att.textContent.length : 0),
+        0
+      );
+
+    if (
+      parsedReversed.length > 0 &&
+      totalHistoryChars + turnCharCost > MAX_TOTAL_HISTORY_CHARS
+    ) {
+      break;
+    }
+
+    totalHistoryChars += turnCharCost;
+    parsedReversed.push({
       role,
       text,
       attachments: attachCheck.items,
     });
   }
 
+  const turns = parsedReversed.reverse();
   if (turns.length === 0 || turns[turns.length - 1].role !== 'user') {
     return { ok: false, error: 'The latest message must be a non-empty user turn.' };
   }
@@ -950,8 +930,8 @@ async function createServer() {
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     next();
   });
-  app.use('/api/chat/stream', express.json({ limit: '32mb' }));
-  app.use('/api/sync/state', express.json({ limit: '6mb' }));
+  app.use('/api/chat/stream', express.json({ limit: '64mb' }));
+  app.use('/api/sync/state', express.json({ limit: '24mb' }));
   app.use(express.json({ limit: '512kb' }));
 
   app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
@@ -1047,13 +1027,6 @@ async function createServer() {
       return;
     }
 
-    const clientRateKey = authUser?.id || req.ip || 'guest';
-    const rateLimitError = checkClientChatRateLimit(clientRateKey);
-    if (rateLimitError) {
-      res.status(429).json({ error: rateLimitError });
-      return;
-    }
-
     const webSearch = Boolean(body?.webSearch);
     const skipTimerTool = Boolean(body?.skipTimerTool);
     const tzOffsetMinutes =
@@ -1081,7 +1054,7 @@ async function createServer() {
 
     const workspaceInstruction = [
       'You are Hazel in Workspace Studio—a Principal Software Architect, Systems Engineer, and AI/ML Research Scientist.',
-      'Lead directly with complete, production-ready, zero-placeholder code and clear first-principles explanations.',
+      'Lead directly with complete, production-ready, zero-placeholder code and clear first-principles explanations. Never abbreviate, omit sections, or write "// ... rest of code"; provide every line in full.',
       'For single-file web apps/websites, emit one complete self-contained ```html block runnable in Workspace Preview. For multi-file apps or Python/ML systems, emit complete files labeled ```lang:path/to/file with explicit tensor shape comments (# [B, T, D]), edge-case guards, and tests.',
       'Never fabricate file contents, API signatures, or citations.',
     ];
@@ -1192,7 +1165,7 @@ async function createServer() {
       }
     };
 
-    // Strictly free models, capped at max 2 attempts per request to conserve rate/quota
+    // Free-tier resilient attempts with progressive backoff
     const streamAttempts: Array<{
       model: string;
       thinkingLevel: ThinkingLevel;
@@ -1212,7 +1185,14 @@ async function createServer() {
             {
               model: 'gemini-4-hydrogen',
               thinkingLevel: ThinkingLevel.LOW,
-              delayBeforeMs: 1200,
+              delayBeforeMs: 1000,
+              includeThoughts: false,
+              useStreaming: true,
+            },
+            {
+              model: 'gemini-3.1-flash-lite',
+              thinkingLevel: ThinkingLevel.MINIMAL,
+              delayBeforeMs: 2200,
               includeThoughts: false,
               useStreaming: true,
             },
@@ -1230,7 +1210,14 @@ async function createServer() {
               model: 'gemini-3.1-flash-lite',
               thinkingLevel:
                 mode === 'coder' ? ThinkingLevel.HIGH : ThinkingLevel.LOW,
-              delayBeforeMs: 1200,
+              delayBeforeMs: 1000,
+              includeThoughts: false,
+              useStreaming: true,
+            },
+            {
+              model: 'gemini-4-hydrogen',
+              thinkingLevel: ThinkingLevel.LOW,
+              delayBeforeMs: 2200,
               includeThoughts: false,
               useStreaming: true,
             },
@@ -1239,13 +1226,15 @@ async function createServer() {
     const processCandidate = (
       candidate: {
         content?: { parts?: Part[] };
+        finishReason?: FinishReason | string;
         groundingMetadata?: {
           groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
         };
       } | undefined,
       pendingCallParts: Part[],
-      modelTurnParts: Part[]
-    ): boolean => {
+      modelTurnParts: Part[],
+      onTextChunk: (chunkText: string) => void
+    ): { emitted: boolean; finishReason?: FinishReason | string } => {
       let emitted = false;
       const parts = candidate?.content?.parts ?? [];
 
@@ -1264,6 +1253,7 @@ async function createServer() {
           writeSseEvent(res, 'thought', { delta: part.text });
         } else {
           emittedTextChars += part.text.length;
+          onTextChunk(part.text);
           writeSseEvent(res, 'text', { delta: part.text });
         }
       }
@@ -1284,13 +1274,19 @@ async function createServer() {
         }
       }
 
-      return emitted;
+      return { emitted, finishReason: candidate?.finishReason };
     };
 
     const streamTurn = async (
       turnContents: Content[],
-      allowTools: boolean
-    ): Promise<{ pendingCallParts: Part[]; modelTurnParts: Part[] }> => {
+      allowTools: boolean,
+      isContinuation = false
+    ): Promise<{
+      pendingCallParts: Part[];
+      modelTurnParts: Part[];
+      finishReason?: FinishReason | string;
+      turnText: string;
+    }> => {
       let lastErr: unknown;
 
       for (let attemptIdx = 0; attemptIdx < streamAttempts.length; attemptIdx++) {
@@ -1303,13 +1299,15 @@ async function createServer() {
 
         const pendingCallParts: Part[] = [];
         const modelTurnParts: Part[] = [];
+        let turnText = '';
+        let lastFinishReason: FinishReason | string | undefined;
         let sawOutputInAttempt = false;
         const useTools = allowTools && tools.length > 0;
         const requestConfig = {
           systemInstruction,
           thinkingConfig: {
-            thinkingLevel: plan.thinkingLevel,
-            includeThoughts: plan.includeThoughts,
+            thinkingLevel: isContinuation ? ThinkingLevel.LOW : plan.thinkingLevel,
+            includeThoughts: isContinuation ? false : plan.includeThoughts,
           },
           ...(useTools
             ? {
@@ -1331,8 +1329,20 @@ async function createServer() {
 
             for await (const chunk of stream) {
               if (clientClosed) break;
-              if (processCandidate(chunk.candidates?.[0], pendingCallParts, modelTurnParts)) {
+              const cand = chunk.candidates?.[0];
+              const step = processCandidate(
+                cand,
+                pendingCallParts,
+                modelTurnParts,
+                (delta) => {
+                  turnText += delta;
+                }
+              );
+              if (step.emitted) {
                 sawOutputInAttempt = true;
+              }
+              if (step.finishReason) {
+                lastFinishReason = step.finishReason;
               }
             }
           } else {
@@ -1342,23 +1352,35 @@ async function createServer() {
               config: requestConfig,
             });
             if (!clientClosed) {
-              if (
-                processCandidate(
-                  response.candidates?.[0],
-                  pendingCallParts,
-                  modelTurnParts
-                )
-              ) {
+              const cand = response.candidates?.[0];
+              const step = processCandidate(
+                cand,
+                pendingCallParts,
+                modelTurnParts,
+                (delta) => {
+                  turnText += delta;
+                }
+              );
+              if (step.finishReason) {
+                lastFinishReason = step.finishReason;
+              }
+              if (step.emitted) {
                 sawOutputInAttempt = true;
               } else if (typeof response.text === 'string' && response.text.length > 0) {
                 sawOutputInAttempt = true;
+                turnText += response.text;
                 emittedTextChars += response.text.length;
                 writeSseEvent(res, 'text', { delta: response.text });
               }
             }
           }
 
-          return { pendingCallParts, modelTurnParts };
+          return {
+            pendingCallParts,
+            modelTurnParts,
+            finishReason: lastFinishReason,
+            turnText,
+          };
         } catch (err) {
           lastErr = err;
           if (sawOutputInAttempt || clientClosed) {
@@ -1384,11 +1406,74 @@ async function createServer() {
         }
       }
       if (lastErr) throw lastErr;
-      return { pendingCallParts: [], modelTurnParts: [] };
+      return {
+        pendingCallParts: [],
+        modelTurnParts: [],
+        finishReason: undefined,
+        turnText: '',
+      };
+    };
+
+    const streamWithAutoContinue = async (
+      baseContents: Content[],
+      allowTools: boolean
+    ): Promise<{ pendingCallParts: Part[]; modelTurnParts: Part[] }> => {
+      const firstResult = await streamTurn(baseContents, allowTools, false);
+      if (clientClosed || firstResult.pendingCallParts.length > 0) {
+        return {
+          pendingCallParts: firstResult.pendingCallParts,
+          modelTurnParts: firstResult.modelTurnParts,
+        };
+      }
+
+      let fullGeneratedText = firstResult.turnText;
+      let finishReason = firstResult.finishReason;
+      let continuationCount = 0;
+
+      while (
+        !clientClosed &&
+        finishReason === FinishReason.MAX_TOKENS &&
+        fullGeneratedText.length > 0 &&
+        continuationCount < MAX_STREAM_CONTINUATIONS
+      ) {
+        continuationCount += 1;
+        await sleepWithKeepalive(200);
+        if (clientClosed) break;
+
+        const contextTail =
+          fullGeneratedText.length > CONTINUATION_CONTEXT_CHARS
+            ? fullGeneratedText.slice(-CONTINUATION_CONTEXT_CHARS)
+            : fullGeneratedText;
+
+        const continuationContents: Content[] = [
+          ...baseContents,
+          { role: 'model', parts: [{ text: contextTail }] },
+          {
+            role: 'user',
+            parts: [
+              {
+                text: 'Continue seamlessly from your exact last character. Do not repeat any text you already wrote, do not add any intro, apology, or recap, and finish cleanly.',
+              },
+            ],
+          },
+        ];
+
+        const nextResult = await streamTurn(continuationContents, false, true);
+        if (!nextResult.turnText) {
+          break;
+        }
+        fullGeneratedText += nextResult.turnText;
+        finishReason = nextResult.finishReason;
+      }
+
+      return {
+        pendingCallParts: [],
+        modelTurnParts: firstResult.modelTurnParts,
+      };
     };
 
     try {
-      const { pendingCallParts, modelTurnParts } = await streamTurn(contents, true);
+      const { pendingCallParts, modelTurnParts } = await streamWithAutoContinue(contents, true);
 
       if (!clientClosed && pendingCallParts.length > 0) {
         const functionResponseParts: Part[] = [];
@@ -1571,7 +1656,7 @@ async function createServer() {
             { role: 'user', parts: functionResponseParts },
           ];
           try {
-            await streamTurn(followUpContents, false);
+            await streamWithAutoContinue(followUpContents, false);
           } catch (followErr) {
             if (emittedWidgets === 0) {
               throw followErr;
@@ -1601,9 +1686,6 @@ async function createServer() {
           err,
           'Failed to generate a response. Please try again.'
         );
-        if (status === 429 || status === 503) {
-          noteClientOverloadCooldown(clientRateKey);
-        }
         writeSseEvent(res, 'error', { status, message });
       }
     } finally {
@@ -1758,248 +1840,348 @@ async function createServer() {
       .filter(Boolean)
       .join('\n\n');
 
-    const sessionPromise = ai.live
-      .connect({
-        model: 'gemini-3.8-live',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: requestedVoice },
-            },
-          },
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          tools: [
-            {
-              functionDeclarations: [
-                setTimerTool,
-                setReminderTool,
-                saveMemoryTool,
-                forgetMemoryTool,
-              ],
-            },
-          ],
-          systemInstruction: liveSystemInstruction,
-        },
-        callbacks: {
-          onopen: () => {
-            sendToClient({ type: 'ready', voice: requestedVoice });
-          },
-          onmessage: (message: LiveServerMessage) => {
-            if (message.toolCall?.functionCalls?.length) {
-              const calls = message.toolCall.functionCalls;
-              void (async () => {
-                const responses = await Promise.all(
-                  calls.map(async (call) => {
-                    const args = (call.args ?? {}) as Record<string, unknown>;
-                    if (call.name === 'set_timer' || call.name === 'set_reminder') {
-                      const resolved = resolveReminderArgs(
-                        args,
-                        requestedTzOffset,
-                        call.name === 'set_reminder'
-                      );
+    let latestResumptionHandle: string | null = null;
+    let readySent = false;
+    let resumeCount = 0;
+    let isReconnecting = false;
+    let activeConnSeq = 0;
+    const MAX_LIVE_RESUMES = 25;
 
-                      sendToClient({
-                        type: 'timer',
-                        timer: {
-                          kind: 'timer',
-                          id: makeWidgetId(resolved.isReminder ? 'rem' : 'tmr'),
-                          label: resolved.label,
-                          durationSeconds: resolved.durationSeconds,
-                          createdAt: Date.now(),
-                          targetTime: resolved.targetTime,
-                          isReminder: resolved.isReminder,
-                          reminderNote: resolved.isReminder ? resolved.label : undefined,
-                        },
-                      });
+    type LiveSessionType = Awaited<ReturnType<typeof ai.live.connect>>;
+    let activeSession: LiveSessionType | null = null;
 
-                      return {
-                        id: call.id,
-                        name: call.name,
-                        response: {
-                          result: `${resolved.isReminder ? 'Reminder' : 'Timer'} "${resolved.label}" scheduled for ${resolved.durationSeconds} seconds from now with expiration alert.`,
-                        },
-                      };
+    const connectLiveUpstream = (resumeHandle?: string): Promise<LiveSessionType | null> => {
+      const connSeq = ++activeConnSeq;
+      let connSession: LiveSessionType | null = null;
+
+      const promise = ai.live
+        .connect({
+          model: 'gemini-3.8-live',
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: requestedVoice },
+              },
+            },
+            inputAudioTranscription: {},
+            outputAudioTranscription: {},
+            contextWindowCompression: {
+              slidingWindow: {},
+            },
+            sessionResumption: resumeHandle
+              ? { handle: resumeHandle, transparent: true }
+              : { transparent: true },
+            tools: [
+              {
+                functionDeclarations: [
+                  setTimerTool,
+                  setReminderTool,
+                  saveMemoryTool,
+                  forgetMemoryTool,
+                ],
+              },
+            ],
+            systemInstruction: liveSystemInstruction,
+          },
+          callbacks: {
+            onopen: () => {
+              if (closedByClient || connSeq !== activeConnSeq) return;
+              if (!readySent) {
+                readySent = true;
+                sendToClient({ type: 'ready', voice: requestedVoice });
+              }
+            },
+            onmessage: (message: LiveServerMessage) => {
+              if (closedByClient || connSeq !== activeConnSeq) return;
+
+              if (
+                message.sessionResumptionUpdate?.resumable &&
+                message.sessionResumptionUpdate?.newHandle
+              ) {
+                latestResumptionHandle = message.sessionResumptionUpdate.newHandle;
+              }
+
+              if (
+                message.goAway &&
+                latestResumptionHandle &&
+                !closedByClient &&
+                !isReconnecting &&
+                resumeCount < MAX_LIVE_RESUMES
+              ) {
+                isReconnecting = true;
+                resumeCount += 1;
+                const oldSess = connSession ?? activeSession;
+                const nextPromise = connectLiveUpstream(latestResumptionHandle);
+                sessionPromise = nextPromise;
+                void nextPromise
+                  .then((newSess) => {
+                    if (oldSess && oldSess !== newSess) {
+                      try {
+                        oldSess.close();
+                      } catch {
+                        // Ignore close on replaced session
+                      }
                     }
+                  })
+                  .finally(() => {
+                    isReconnecting = false;
+                  });
+              }
 
-                    if (call.name === 'save_memory') {
-                      const memContent =
-                        typeof args.content === 'string' ? args.content.trim() : '';
-                      const memCategory =
-                        typeof args.category === 'string'
-                          ? args.category.trim().toLowerCase()
-                          : 'general';
-                      if (memContent) {
-                        const saved = await saveMemoryForContext(
-                          liveAuthContext,
-                          {
-                            content: memContent,
-                            category: memCategory,
-                            source: 'live',
-                          },
-                          liveGuestMemories
+              if (message.toolCall?.functionCalls?.length) {
+                const calls = message.toolCall.functionCalls;
+                void (async () => {
+                  const responses = await Promise.all(
+                    calls.map(async (call) => {
+                      const args = (call.args ?? {}) as Record<string, unknown>;
+                      if (call.name === 'set_timer' || call.name === 'set_reminder') {
+                        const resolved = resolveReminderArgs(
+                          args,
+                          requestedTzOffset,
+                          call.name === 'set_reminder'
                         );
-                        if (!liveAuthContext) {
-                          liveGuestMemories = [
-                            saved.memory,
-                            ...liveGuestMemories.filter((m) => m.id !== saved.memory.id),
-                          ].slice(0, 120);
-                        }
+
                         sendToClient({
-                          type: 'memory',
-                          action: 'saved',
-                          memory: saved.memory,
+                          type: 'timer',
+                          timer: {
+                            kind: 'timer',
+                            id: makeWidgetId(resolved.isReminder ? 'rem' : 'tmr'),
+                            label: resolved.label,
+                            durationSeconds: resolved.durationSeconds,
+                            createdAt: Date.now(),
+                            targetTime: resolved.targetTime,
+                            isReminder: resolved.isReminder,
+                            reminderNote: resolved.isReminder ? resolved.label : undefined,
+                          },
                         });
+
                         return {
                           id: call.id,
                           name: call.name,
                           response: {
-                            result: `Saved to long-term memory: "${saved.memory.content}".`,
+                            result: `${resolved.isReminder ? 'Reminder' : 'Timer'} "${resolved.label}" scheduled for ${resolved.durationSeconds} seconds from now with expiration alert.`,
                           },
                         };
                       }
-                      return {
-                        id: call.id,
-                        name: call.name,
-                        response: { result: 'No memory text provided.' },
-                      };
-                    }
 
-                    if (call.name === 'forget_memory') {
-                      const query =
-                        typeof args.query === 'string' ? args.query.trim() : '';
-                      const removedRes = await forgetMemoryForContext(
-                        liveAuthContext,
-                        query,
-                        liveGuestMemories
-                      );
-                      if (removedRes.removed.length > 0) {
-                        if (!liveAuthContext) {
-                          const removedSet = new Set(removedRes.removed.map((m) => m.id));
-                          liveGuestMemories = liveGuestMemories.filter((m) => !removedSet.has(m.id));
+                      if (call.name === 'save_memory') {
+                        const memContent =
+                          typeof args.content === 'string' ? args.content.trim() : '';
+                        const memCategory =
+                          typeof args.category === 'string'
+                            ? args.category.trim().toLowerCase()
+                            : 'general';
+                        if (memContent) {
+                          const saved = await saveMemoryForContext(
+                            liveAuthContext,
+                            {
+                              content: memContent,
+                              category: memCategory,
+                              source: 'live',
+                            },
+                            liveGuestMemories
+                          );
+                          if (!liveAuthContext) {
+                            liveGuestMemories = [
+                              saved.memory,
+                              ...liveGuestMemories.filter((m) => m.id !== saved.memory.id),
+                            ].slice(0, 120);
+                          }
+                          sendToClient({
+                            type: 'memory',
+                            action: 'saved',
+                            memory: saved.memory,
+                          });
+                          return {
+                            id: call.id,
+                            name: call.name,
+                            response: {
+                              result: `Saved to long-term memory: "${saved.memory.content}".`,
+                            },
+                          };
                         }
-                        sendToClient({
-                          type: 'memory',
-                          action: 'forgotten',
-                          removedIds: removedRes.removed.map((m) => m.id),
-                          removed: removedRes.removed,
-                        });
+                        return {
+                          id: call.id,
+                          name: call.name,
+                          response: { result: 'No memory text provided.' },
+                        };
                       }
+
+                      if (call.name === 'forget_memory') {
+                        const query =
+                          typeof args.query === 'string' ? args.query.trim() : '';
+                        const removedRes = await forgetMemoryForContext(
+                          liveAuthContext,
+                          query,
+                          liveGuestMemories
+                        );
+                        if (removedRes.removed.length > 0) {
+                          if (!liveAuthContext) {
+                            const removedSet = new Set(removedRes.removed.map((m) => m.id));
+                            liveGuestMemories = liveGuestMemories.filter((m) => !removedSet.has(m.id));
+                          }
+                          sendToClient({
+                            type: 'memory',
+                            action: 'forgotten',
+                            removedIds: removedRes.removed.map((m) => m.id),
+                            removed: removedRes.removed,
+                          });
+                        }
+                        return {
+                          id: call.id,
+                          name: call.name,
+                          response: {
+                            result:
+                              removedRes.removed.length > 0
+                                ? `Removed ${removedRes.removed.length} matching memory item(s).`
+                                : 'No matching memory found to remove.',
+                          },
+                        };
+                      }
+
                       return {
                         id: call.id,
                         name: call.name,
-                        response: {
-                          result:
-                            removedRes.removed.length > 0
-                              ? `Removed ${removedRes.removed.length} matching memory item(s).`
-                              : 'No matching memory found to remove.',
-                        },
+                        response: { result: 'Completed.' },
                       };
-                    }
+                    })
+                  );
 
-                    return {
-                      id: call.id,
-                      name: call.name,
-                      response: { result: 'Completed.' },
-                    };
-                  })
-                );
+                  const sess = await sessionPromise;
+                  if (sess && !closedByClient) {
+                    sess.sendToolResponse({ functionResponses: responses });
+                  }
+                })();
+              }
 
-                const sess = await sessionPromise;
-                if (sess && !closedByClient) {
-                  sess.sendToolResponse({ functionResponses: responses });
-                }
-              })();
-            }
+              const content = message.serverContent;
+              if (!content) return;
 
-            const content = message.serverContent;
-            if (!content) return;
-
-            if (content.inputTranscription?.text) {
-              sendToClient({
-                type: 'inputTranscript',
-                text: content.inputTranscription.text,
-              });
-            }
-
-            if (content.outputTranscription?.text) {
-              sendToClient({
-                type: 'outputTranscript',
-                text: content.outputTranscription.text,
-              });
-            }
-
-            for (const part of content.modelTurn?.parts ?? []) {
-              if (part.inlineData?.data) {
+              if (content.inputTranscription?.text) {
                 sendToClient({
-                  type: 'audio',
-                  data: part.inlineData.data,
+                  type: 'inputTranscript',
+                  text: content.inputTranscription.text,
                 });
               }
-            }
 
-            if (content.interrupted) {
-              sendToClient({ type: 'interrupted' });
-            }
-
-            if (content.turnComplete) {
-              sendToClient({ type: 'turnComplete' });
-            }
-          },
-          onerror: (err: unknown) => {
-            const eventLike = err as {
-              message?: string;
-              error?: unknown;
-            };
-            const inner = eventLike?.error ?? err;
-            const rawDetail =
-              typeof eventLike?.message === 'string' && eventLike.message.trim()
-                ? eventLike.message
-                : inner instanceof Error
-                  ? inner.message
-                  : '';
-            console.error('[Live API onerror]', rawDetail || err);
-            const { message } = extractGeminiError(
-              inner instanceof Error ? inner : new Error(rawDetail || 'Live voice connection encountered an error.'),
-              'Live voice connection encountered an error.'
-            );
-            sentError = true;
-            sendToClient({ type: 'error', message });
-          },
-          onclose: (closeEvent: unknown) => {
-            const ev = closeEvent as { code?: number; reason?: string };
-            if (ev?.code && ev.code !== 1000 && ev.code !== 1005) {
-              console.warn('[Live API onclose]', ev.code, ev.reason);
-              if (!sentError) {
-                const rawReason = ev.reason?.trim() || 'Live voice connection closed unexpectedly.';
-                const { message } = extractGeminiError(
-                  new Error(rawReason),
-                  rawReason
-                );
-                sentError = true;
-                sendToClient({ type: 'error', message });
+              if (content.outputTranscription?.text) {
+                sendToClient({
+                  type: 'outputTranscript',
+                  text: content.outputTranscription.text,
+                });
               }
-            }
-            sendToClient({ type: 'closed' });
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.close();
-            }
+
+              for (const part of content.modelTurn?.parts ?? []) {
+                if (part.inlineData?.data) {
+                  sendToClient({
+                    type: 'audio',
+                    data: part.inlineData.data,
+                  });
+                }
+              }
+
+              if (content.interrupted) {
+                sendToClient({ type: 'interrupted' });
+              }
+
+              if (content.turnComplete) {
+                sendToClient({ type: 'turnComplete' });
+              }
+            },
+            onerror: (err: unknown) => {
+              if (closedByClient || connSeq !== activeConnSeq) return;
+              const eventLike = err as {
+                message?: string;
+                error?: unknown;
+              };
+              const inner = eventLike?.error ?? err;
+              const rawDetail =
+                typeof eventLike?.message === 'string' && eventLike.message.trim()
+                  ? eventLike.message
+                  : inner instanceof Error
+                    ? inner.message
+                    : '';
+              console.error('[Live API onerror]', rawDetail || err);
+              const { message } = extractGeminiError(
+                inner instanceof Error ? inner : new Error(rawDetail || 'Live voice connection encountered an error.'),
+                'Live voice connection encountered an error.'
+              );
+              sentError = true;
+              sendToClient({ type: 'error', message });
+            },
+            onclose: (closeEvent: unknown) => {
+              // Always ignore closes from replaced/stale connections or already-closed clients
+              if (closedByClient || connSeq !== activeConnSeq) return;
+
+              const ev = closeEvent as { code?: number; reason?: string };
+
+              if (
+                latestResumptionHandle &&
+                resumeCount < MAX_LIVE_RESUMES &&
+                !sentError
+              ) {
+                isReconnecting = true;
+                resumeCount += 1;
+                sessionPromise = connectLiveUpstream(latestResumptionHandle);
+                void sessionPromise.finally(() => {
+                  isReconnecting = false;
+                });
+                return;
+              }
+
+              if (ev?.code && ev.code !== 1000 && ev.code !== 1005) {
+                console.warn('[Live API onclose]', ev.code, ev.reason);
+                if (!sentError) {
+                  const rawReason = ev.reason?.trim() || 'Live voice connection closed unexpectedly.';
+                  const { message } = extractGeminiError(
+                    new Error(rawReason),
+                    rawReason
+                  );
+                  sentError = true;
+                  sendToClient({ type: 'error', message });
+                }
+              }
+              sendToClient({ type: 'closed' });
+              if (clientWs.readyState === WebSocket.OPEN) {
+                clientWs.close();
+              }
+            },
           },
-        },
-      })
-      .catch((err: unknown) => {
-        const { message } = extractGeminiError(
-          err,
-          'Could not open a live voice session.'
-        );
-        sentError = true;
-        sendToClient({ type: 'error', message });
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.close();
-        }
-        return null;
-      });
+        })
+        .then((sess) => {
+          connSession = sess;
+          if (closedByClient || connSeq !== activeConnSeq) {
+            try {
+              sess.close();
+            } catch {
+              // Ignore close on superseded or closed upstream session
+            }
+            return null;
+          }
+          activeSession = sess;
+          return sess;
+        })
+        .catch((err: unknown) => {
+          if (closedByClient || connSeq !== activeConnSeq) {
+            return null;
+          }
+          const { message } = extractGeminiError(
+            err,
+            'Could not open a live voice session.'
+          );
+          sentError = true;
+          sendToClient({ type: 'error', message });
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.close();
+          }
+          return null;
+        });
+
+      return promise;
+    };
+
+    let sessionPromise = connectLiveUpstream();
 
     clientWs.on('message', async (raw) => {
       if (closedByClient) return;
@@ -2046,12 +2228,21 @@ async function createServer() {
 
     clientWs.on('close', async () => {
       closedByClient = true;
+      activeConnSeq += 1;
       const session = await sessionPromise;
       try {
         session?.close();
       } catch {
         // Ignore close errors
       }
+      if (activeSession && activeSession !== session) {
+        try {
+          activeSession.close();
+        } catch {
+          // Ignore close errors
+        }
+      }
+      activeSession = null;
     });
   });
 
@@ -2100,6 +2291,10 @@ async function createServer() {
       res.sendFile(indexHtmlPath);
     });
   }
+
+  httpServer.on('error', (err) => {
+    console.error('Hazel HTTP server error:', err);
+  });
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Hazel chat server listening on http://0.0.0.0:${PORT}`);

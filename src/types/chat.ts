@@ -2,6 +2,8 @@ export type ReasoningMode = 'fast' | 'teacher' | 'deep' | 'coder';
 
 export type AppView = 'chat' | 'workspace' | 'admin';
 
+export type ChatSpace = 'chat' | 'workspace';
+
 export type AttachmentKind = 'image' | 'pdf' | 'text';
 
 export interface AttachmentItem {
@@ -174,6 +176,7 @@ export interface ChatCategory {
 
 export interface ChatSession {
   id: string;
+  space?: ChatSpace;
   title: string;
   pinned: boolean;
   categoryId?: string | null;

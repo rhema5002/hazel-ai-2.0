@@ -390,7 +390,7 @@ export const PromptComposer: React.FC<PromptComposerProps> = ({
                 : 'Chat with Hazel about your day or anything on your mind…'
           }
           aria-label="Message prompt"
-          className="chat-scroll max-h-[180px] w-full resize-none bg-transparent px-1.5 py-1 text-[15px] leading-relaxed text-slate-900 placeholder:text-slate-500 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-400"
+          className="chat-scroll max-h-[180px] w-full resize-none bg-transparent px-1.5 py-1 text-[15px] leading-relaxed text-slate-900 placeholder:text-slate-500 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-400 dark:caret-zinc-100"
         />
 
         {/* Bottom Composer Action Row */}
