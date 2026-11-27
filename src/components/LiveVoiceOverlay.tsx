@@ -491,20 +491,20 @@ export const LiveVoiceOverlay: React.FC<LiveVoiceOverlayProps> = ({
     >
       {/* Top Bar */}
       <div className="flex shrink-0 items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2 sm:px-6">
-        <div className="flex items-center gap-2.5">
+        <div className="flex min-w-0 items-center gap-2">
           <SparkEmblem size={28} streaming={status === 'speaking' || status === 'connecting'} />
-          <span className="font-display text-base font-semibold tracking-tight">
+          <span className="font-display truncate whitespace-nowrap text-sm font-semibold tracking-tight sm:text-base">
             {isWorkspaceLive ? 'Workspace Live' : 'Hazel Live'}
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
           <label className="sr-only" htmlFor="live-voice-select">
             Voice persona
           </label>
-          <div className="inline-flex items-center gap-1.5 rounded-full border border-slate-200/90 bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-700 dark:border-zinc-700/80 dark:bg-[#1E1F20] dark:text-zinc-200">
+          <div className="inline-flex max-w-[170px] items-center gap-1.5 rounded-full border border-slate-200/90 bg-white/90 px-2.5 py-1.5 text-xs font-medium text-slate-700 sm:max-w-none sm:px-3 dark:border-zinc-700/80 dark:bg-[#1E1F20] dark:text-zinc-200">
             <Volume2
-              className={`h-3.5 w-3.5 ${
+              className={`h-3.5 w-3.5 shrink-0 ${
                 isWorkspaceLive
                   ? 'text-rose-600 dark:text-rose-400'
                   : 'text-blue-600 dark:text-blue-400'
@@ -516,7 +516,7 @@ export const LiveVoiceOverlay: React.FC<LiveVoiceOverlayProps> = ({
               value={voice}
               onChange={(e) => setVoice(e.target.value as LiveVoiceName)}
               aria-label="Select Hazel voice"
-              className="bg-transparent pr-1 text-xs font-medium focus:outline-none dark:bg-[#1E1F20]"
+              className="min-w-0 truncate bg-transparent pr-1 text-xs font-medium focus:outline-none dark:bg-[#1E1F20]"
             >
               {LIVE_VOICES.map((v) => (
                 <option key={v.id} value={v.id}>

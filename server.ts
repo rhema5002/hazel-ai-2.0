@@ -176,8 +176,21 @@ async function generateContentWithRetry(
       await new Promise((r) => setTimeout(r, attempt.delayMs));
     }
     try {
+      const nextConfig =
+        params.config &&
+        attempt.model !== 'gemini-3.1-flash-lite' &&
+        params.config.thinkingConfig?.thinkingLevel === ThinkingLevel.MINIMAL
+          ? {
+              ...params.config,
+              thinkingConfig: {
+                ...params.config.thinkingConfig,
+                thinkingLevel: ThinkingLevel.LOW,
+              },
+            }
+          : params.config;
       return await ai.models.generateContent({
         ...params,
+        ...(nextConfig ? { config: nextConfig } : {}),
         model: attempt.model,
       });
     } catch (err) {
@@ -189,6 +202,9 @@ async function generateContentWithRetry(
           : 502;
       const unwrapped = unwrapJsonErrorMessage(rawMessage);
       const code = unwrapped.code ?? rawStatus;
+      if (code === 429 && i >= 1) {
+        throw err;
+      }
       if (!isTransientOverloadError(code, unwrapped.message || rawMessage)) {
         throw err;
       }
@@ -1239,9 +1255,7 @@ async function createServer() {
       const parts = candidate?.content?.parts ?? [];
 
       for (const part of parts) {
-        if (!part.thought) {
-          modelTurnParts.push(part);
-        }
+        modelTurnParts.push(part);
         if (part.functionCall) {
           emitted = true;
           pendingCallParts.push(part);
@@ -1395,9 +1409,15 @@ async function createServer() {
           const resolvedStatus = unwrapped.code ?? rawStatus;
           const msgToCheck = unwrapped.message || rawMsg;
 
-          const canRetry =
-            isTransientOverloadError(resolvedStatus, msgToCheck) ||
-            (resolvedStatus === 400 && attemptIdx < streamAttempts.length - 1);
+          const isQuota429 =
+            resolvedStatus === 429 ||
+            /quota|rate limit|resource_exhausted/i.test(msgToCheck);
+          // Do not burn retries when Google Search grounding is quota-limited,
+          // and allow at most 1 model-bucket switch on regular 429 spikes.
+          const canRetry = isQuota429
+            ? !webSearch && attemptIdx === 0
+            : isTransientOverloadError(resolvedStatus, msgToCheck) ||
+              (resolvedStatus === 400 && attemptIdx < streamAttempts.length - 1);
 
           if (canRetry && attemptIdx < streamAttempts.length - 1) {
             continue;
@@ -1686,7 +1706,11 @@ async function createServer() {
           err,
           'Failed to generate a response. Please try again.'
         );
-        writeSseEvent(res, 'error', { status, message });
+        const finalMessage =
+          webSearch && status === 429
+            ? 'Live Web Search grounding reached its free-tier quota limit right now. Turn off Web Search (the globe icon) to continue chatting normally, or check your Gemini API quota.'
+            : message;
+        writeSseEvent(res, 'error', { status, message: finalMessage });
       }
     } finally {
       if (!res.writableEnded) {
@@ -1869,9 +1893,7 @@ async function createServer() {
             contextWindowCompression: {
               slidingWindow: {},
             },
-            sessionResumption: resumeHandle
-              ? { handle: resumeHandle, transparent: true }
-              : { transparent: true },
+            sessionResumption: resumeHandle ? { handle: resumeHandle } : {},
             tools: [
               {
                 functionDeclarations: [

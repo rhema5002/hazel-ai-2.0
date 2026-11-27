@@ -329,6 +329,9 @@ export class LiveVoiceSessionClient {
 
   private enqueueOutputAudio(base64Pcm: string): void {
     if (!this.outputCtx || !this.outputAnalyser) return;
+    if (this.outputCtx.state === 'suspended') {
+      void this.outputCtx.resume().catch(() => {});
+    }
     let floats: Float32Array;
     try {
       floats = base64PcmToFloat32(base64Pcm);
@@ -417,6 +420,10 @@ export class LiveVoiceSessionClient {
     }
 
     if (this.ws) {
+      this.ws.onopen = null;
+      this.ws.onmessage = null;
+      this.ws.onerror = null;
+      this.ws.onclose = null;
       try {
         if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
           this.ws.close();
